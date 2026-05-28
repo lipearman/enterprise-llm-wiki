@@ -7,6 +7,7 @@ from app.services.extraction_service import extraction_service
 from app.services.ollama_client import embed_llm
 from app.services.wiki_service import wiki_service
 from app.services.qa_service import qa_service
+from app.services.relationship_service import relationship_service
 
 
 class IngestPipeline:
@@ -24,7 +25,25 @@ class IngestPipeline:
             result["status"] = "enriched"
         return result
 
+    def _enrich_title(self, title: str, source_urls: list[str]) -> str:
+        """Derive a meaningful title from URL path when page title is too generic."""
+        if not source_urls:
+            return title
+        url = source_urls[0]
+        try:
+            from urllib.parse import urlparse
+            path = urlparse(url).path.strip("/")
+            # Remove language prefix like 'th/'
+            parts = [p for p in path.split("/") if p and p not in ("th", "en")]
+            if parts:
+                label = " - ".join(p.replace("-", " ").title() for p in parts[-2:])
+                return f"{title} ({label})" if title and title.lower() not in label.lower() else label
+        except Exception:
+            pass
+        return title
+
     async def deep_enrich(self, company_code: str, title: str, content: str, source_urls: list[str]) -> dict:
+        title = self._enrich_title(title, source_urls)
         facts = await extraction_service.extract_facts(title, content)
         fact_res = supabase.table("extracted_facts").insert({
             "company_code": company_code,
@@ -34,7 +53,20 @@ class IngestPipeline:
         }).execute()
         wiki_page = await wiki_service.generate_wiki_page(company_code, title, facts, source_urls)
         canonical_qa = await qa_service.generate_canonical_qa(company_code, wiki_page.get("id"), wiki_page.get("content_markdown", ""))
-        return {"facts": fact_res.data[0] if fact_res.data else facts, "wiki_page": wiki_page, "canonical_qa": canonical_qa}
+        relationships: list[dict] = []
+        if settings.ENABLE_RELATIONSHIP_SEARCH:
+            relationships = await relationship_service.extract_relationships(
+                company_code=company_code,
+                wiki_page_id=wiki_page.get("id"),
+                title=title,
+                content=wiki_page.get("content_markdown", ""),
+            )
+        return {
+            "facts": fact_res.data[0] if fact_res.data else facts,
+            "wiki_page": wiki_page,
+            "canonical_qa": canonical_qa,
+            "relationships": relationships,
+        }
 
     def _upsert_source(self, company_code: str, source_type: str, source_url: str, source_name: str) -> dict:
         res = supabase.table("knowledge_sources").upsert({

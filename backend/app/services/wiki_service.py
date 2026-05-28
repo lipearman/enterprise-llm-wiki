@@ -34,6 +34,12 @@ SOURCE_URLS: {source_urls}
             "status": "published",
             "version": 1,
         }
+        # Auto-increment version if slug already exists for this company
+        slug = page["slug"]
+        existing = supabase.table("wiki_pages").select("version").eq("company_code", company_code).eq("slug", slug).order("version", desc=True).limit(1).execute()
+        next_version = (existing.data[0]["version"] + 1) if existing.data else 1
+        page["version"] = next_version
+
         res = supabase.table("wiki_pages").insert(page).execute()
         return res.data[0] if res.data else page
 
