@@ -12,9 +12,15 @@ from app.services.relationship_service import relationship_service
 
 
 class IngestPipeline:
-    async def ingest_url(self, url: str, company_code: str | None = None, run_deep_enrichment: bool = True) -> dict:
+    async def ingest_url(
+        self,
+        url: str,
+        company_code: str | None = None,
+        run_deep_enrichment: bool = True,
+        crawler_backend: str | None = None,
+    ) -> dict:
         company_code = company_code or settings.DEFAULT_COMPANY_CODE
-        doc = await crawler_service.fetch_url(url)
+        doc = await crawler_service.fetch_url(url, backend=crawler_backend)
         source = self._upsert_source(company_code, "url", url, doc["title"])
 
         # Change detection: skip heavy processing if content unchanged

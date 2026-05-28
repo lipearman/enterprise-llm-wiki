@@ -1,28 +1,29 @@
-import trafilatura
-from bs4 import BeautifulSoup
-import httpx
+"""
+crawler_service.py — thin façade over the crawler backends.
+
+Usage:
+    from app.services.crawler_service import crawler_service
+    doc = await crawler_service.fetch_url(url)                        # uses .env default
+    doc = await crawler_service.fetch_url(url, backend="playwright")  # explicit override
+"""
+from app.services.crawlers.factory import get_crawler
 
 
 class CrawlerService:
-    async def fetch_url(self, url: str) -> dict:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            html = r.text
+    async def fetch_url(self, url: str, backend: str | None = None) -> dict:
+        """
+        Fetch a URL using the specified (or default) crawler backend.
 
-        title = self._extract_title(html) or url
-        text = trafilatura.extract(html, include_comments=False, include_tables=True, output_format="markdown")
-        if not text:
-            soup = BeautifulSoup(html, "html.parser")
-            for tag in soup(["script", "style", "nav", "footer"]):
-                tag.decompose()
-            text = soup.get_text("\n")
-        return {"url": url, "title": title, "content_markdown": text or ""}
+        Args:
+            url     : Target URL to crawl.
+            backend : "trafilatura" | "playwright" | "crawl4ai" | None
+                      None → reads CRAWLER_BACKEND from .env
 
-    def _extract_title(self, html: str) -> str | None:
-        soup = BeautifulSoup(html, "html.parser")
-        if soup.title and soup.title.string:
-            return soup.title.string.strip()
-        return None
+        Returns:
+            dict with keys: url, title, content_markdown, backend
+        """
+        crawler = get_crawler(backend)
+        return await crawler.fetch_url(url)
+
 
 crawler_service = CrawlerService()

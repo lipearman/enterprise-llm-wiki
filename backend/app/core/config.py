@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     ENABLE_RELATIONSHIP_SEARCH: bool = False
     ENABLE_METADATA_SEARCH: bool = True
 
+    # =========================================
+    # CRAWLER
+    # =========================================
+    CRAWLER_BACKEND: str = "trafilatura"   # trafilatura | playwright | crawl4ai
+
     ENABLE_SCHEDULER: bool = True
     DAILY_CRAWL_CRON_HOUR: int = 2
     DAILY_CRAWL_CRON_MINUTE: int = 0

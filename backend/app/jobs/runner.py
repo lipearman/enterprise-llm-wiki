@@ -22,6 +22,7 @@ async def run_job(job: dict) -> None:
                 payload["url"],
                 job.get("company_code"),
                 payload.get("run_deep_enrichment", True),
+                crawler_backend=payload.get("crawler_backend"),
             )
             supabase.table("job_runs").update({"status": "completed", "result": result}).eq("id", job_id).execute()
 

@@ -1,12 +1,14 @@
 import os
 import tempfile
+from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, UploadFile, File, Form, HTTPException
-from app.schemas.source import AddUrlRequest
+from app.schemas.source import AddUrlRequest, CrawlerBackend
 from app.schemas.common import JobCreated
 from app.services.job_service import job_service
 from app.jobs.runner import run_pending_jobs_once
 from app.db.supabase_client import supabase
 from app.core.config import settings
+from app.services.crawlers.factory import BACKENDS
 
 router = APIRouter(prefix="/api/sources", tags=["sources"])
 
@@ -20,6 +22,20 @@ def list_sources(company_code: str | None = None):
         "id,company_code,source_type,source_url,source_name,is_active,created_at"
     ).eq("company_code", company_code).order("created_at", desc=True).execute()
     return {"items": res.data or []}
+
+
+@router.get("/backends")
+def list_backends():
+    """List available crawler backends and the current default."""
+    return {
+        "default": settings.CRAWLER_BACKEND,
+        "available": list(BACKENDS.keys()),
+        "descriptions": {
+            "trafilatura": "Fast, lightweight — static HTML only. No browser required.",
+            "playwright":  "Headless Chromium — renders JavaScript. Requires: playwright install chromium",
+            "crawl4ai":    "LLM-aware crawler on Playwright — best Markdown quality. Requires: crawl4ai-setup",
+        },
+    }
 
 
 @router.get("/{source_id}/pages")
@@ -41,10 +57,22 @@ def delete_source(source_id: str):
 
 @router.post("/url", response_model=JobCreated)
 async def add_url(req: AddUrlRequest, background_tasks: BackgroundTasks):
+    """
+    Ingest a URL into the knowledge base.
+
+    - **crawler_backend**: override which crawler to use for this request.
+      Options: `trafilatura` (default), `playwright`, `crawl4ai`
+    """
     company_code = req.company_code or settings.DEFAULT_COMPANY_CODE
+    backend = req.crawler_backend or settings.CRAWLER_BACKEND
+
     job_id = job_service.create_job(
         "ingest_url",
-        {"url": str(req.url), "run_deep_enrichment": req.run_deep_enrichment},
+        {
+            "url": str(req.url),
+            "run_deep_enrichment": req.run_deep_enrichment,
+            "crawler_backend": backend,
+        },
         company_code,
     )
     background_tasks.add_task(run_pending_jobs_once, 1)
@@ -68,7 +96,6 @@ async def upload_file(
 
     company_code = company_code or settings.DEFAULT_COMPANY_CODE
 
-    # Save uploaded content to a temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
         content = await file.read()
         tmp.write(content)
