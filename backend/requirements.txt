@@ -11,9 +11,9 @@ python-multipart==0.0.20
 trafilatura==2.0.0
 beautifulsoup4==4.12.3
 markdownify==0.14.1
-# Optional crawler backends (install separately if needed)
-# playwright>=1.49.0   -- run: playwright install chromium
-# crawl4ai>=0.4.0      -- run: crawl4ai-setup
+# Optional crawler backends
+playwright==1.60.0     # run after install: playwright install chromium
+crawl4ai==0.8.6        # run after install: patchright install chromium
 langchain-text-splitters==0.3.4
 pypdf==5.1.0
 python-docx==1.1.2
