@@ -344,6 +344,18 @@ enterprise-llm-wiki/
 
 ---
 
+## 📚 Documents
+
+| ไฟล์ | คำอธิบาย |
+|---|---|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 🏗️ ภาพรวม architecture, module map, ingest flow, chat flow และ service dependencies |
+| [TECHNOLOGY_STACK.md](docs/TECHNOLOGY_STACK.md) | 🛠️ รายละเอียด library และ technology ทุกตัวพร้อม version |
+| [ROADMAP.md](docs/ROADMAP.md) | 🗺️ แผนพัฒนา 5 phases พร้อม status ปัจจุบัน |
+| [COMPLETE_PROJECT_INSTRUCTION.md](docs/COMPLETE_PROJECT_INSTRUCTION.md) | 🤖 Task brief สำหรับ developer — requirements, backlog และ coding style |
+| [API_EXAMPLES.http](docs/API_EXAMPLES.http) | 📋 ตัวอย่าง HTTP requests สำหรับทดสอบ API ทุก endpoint |
+
+---
+
 ## 📄 License
 
 MIT © 2024
