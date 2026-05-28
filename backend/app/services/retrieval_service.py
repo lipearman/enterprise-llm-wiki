@@ -38,6 +38,7 @@ class RetrievalService:
     async def search_context(self, question: str, company_code: str) -> list[dict]:
         q_emb = await self.query_embedding(question)
         rows = []
+
         if settings.ENABLE_WIKI_SEARCH:
             res = supabase.rpc("match_wiki_pages", {
                 "query_embedding": q_emb,
@@ -46,6 +47,7 @@ class RetrievalService:
                 "match_count": settings.RETRIEVAL_TOP_K,
             }).execute()
             rows.extend([{**x, "source_type": "wiki"} for x in (res.data or [])])
+
         if settings.ENABLE_CHUNK_SEARCH:
             res = supabase.rpc("match_document_chunks", {
                 "query_embedding": q_emb,
@@ -55,10 +57,13 @@ class RetrievalService:
             }).execute()
             rows.extend([{**x, "source_type": "chunk"} for x in (res.data or [])])
 
+        # Metadata search: boost pages whose title/slug contains question keywords
+        if settings.ENABLE_METADATA_SEARCH and rows:
+            rows = self._apply_metadata_boost(rows, question)
+
         # Graph expansion: find related wiki pages via relationships
         if settings.ENABLE_RELATIONSHIP_SEARCH and rows:
             related = await self._expand_via_relationships(rows, company_code, q_emb)
-            # Add related rows not already in results
             existing_ids = {r.get("id") for r in rows}
             for r in related:
                 if r.get("id") not in existing_ids:
@@ -68,32 +73,45 @@ class RetrievalService:
         rows.sort(key=lambda x: x.get("similarity", 0), reverse=True)
         return rows[: settings.RERANK_TOP_K]
 
+    def _apply_metadata_boost(self, rows: list[dict], question: str) -> list[dict]:
+        """Boost similarity score for pages whose title/slug matches question keywords."""
+        keywords = [w.lower() for w in question.split() if len(w) > 2]
+        if not keywords:
+            return rows
+
+        boosted = []
+        for row in rows:
+            title = (row.get("title") or "").lower()
+            slug = (row.get("slug") or "").lower()
+            combined = f"{title} {slug}"
+            matches = sum(1 for kw in keywords if kw in combined)
+            if matches > 0:
+                boost = min(0.05 * matches, 0.15)  # max +0.15
+                row = {**row, "similarity": min(1.0, (row.get("similarity") or 0) + boost)}
+            boosted.append(row)
+        return boosted
+
     async def _expand_via_relationships(
         self, base_rows: list[dict], company_code: str, q_emb: list[float]
     ) -> list[dict]:
         """Expand context by following wiki_relationships edges from found pages."""
         from app.services.relationship_service import relationship_service
 
-        # Collect entity names from top wiki pages found so far
         top_wiki = [r for r in base_rows if r.get("source_type") == "wiki"][:3]
         entities = [r.get("title", "") for r in top_wiki if r.get("title")]
         if not entities:
             return []
 
-        # Find related entities from graph
         graph_rows = relationship_service.find_related_entities(company_code, entities)
         if not graph_rows:
             return []
 
-        # Collect unique related entity names
         related_entities: set[str] = set()
         for gr in graph_rows:
             related_entities.add(gr["source_entity"])
             related_entities.add(gr["target_entity"])
-        # Remove already-known entities
         related_entities -= set(entities)
 
-        # Fetch wiki pages whose title matches related entities
         extra_rows: list[dict] = []
         for entity in list(related_entities)[:5]:
             try:
@@ -104,7 +122,7 @@ class RetrievalService:
                     extra_rows.append({
                         **page,
                         "source_type": "wiki_relationship",
-                        "similarity": 0.5,   # lower priority than direct vector match
+                        "similarity": 0.5,
                     })
             except Exception as e:
                 logger.warning(f"Relationship expand failed for entity '{entity}': {e}")
@@ -113,5 +131,6 @@ class RetrievalService:
 
     def cache_key(self, question: str, company_code: str) -> str:
         return sha256_text(company_code + "|" + normalize_question(question))
+
 
 retrieval_service = RetrievalService()

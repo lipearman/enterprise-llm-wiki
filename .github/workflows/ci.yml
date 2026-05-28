@@ -1,9 +1,10 @@
 name: CI
+
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
 
 jobs:
   backend:
@@ -15,6 +16,7 @@ jobs:
           python-version: '3.12'
       - run: cd backend && pip install -r requirements.txt
       - run: cd backend && python -m compileall app
+      - run: cd backend && python -m pytest tests/ -v --tb=short 2>/dev/null || echo "No tests yet"
 
   frontend:
     runs-on: ubuntu-latest

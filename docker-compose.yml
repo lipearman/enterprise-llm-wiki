@@ -6,23 +6,42 @@ services:
       - .env
     ports:
       - "8080:8080"
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8080
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   frontend:
     build:
       context: ./frontend
     environment:
       NEXT_PUBLIC_API_BASE_URL: http://localhost:8080
+      NEXT_PUBLIC_COMPANY_CODE: DEVES
     ports:
       - "3000:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
   worker:
     build:
       context: ./backend
     env_file:
       - .env
-    command: python -m app.jobs.runner
+    command: python -u -c "
+import asyncio
+from app.jobs.runner import run_pending_jobs_once
+from app.core.logging import logger
+async def loop():
+    logger.info('Worker started')
+    while True:
+        await run_pending_jobs_once(5)
+        await asyncio.sleep(10)
+asyncio.run(loop())
+"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
