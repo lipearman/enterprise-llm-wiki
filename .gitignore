@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.claude/
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.next/
+dist/
+build/
+.DS_Store
+*.log
+uploads/
+backend/storage/uploads/

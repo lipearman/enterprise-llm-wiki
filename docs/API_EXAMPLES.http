@@ -1,0 +1,32 @@
+@base=http://localhost:8080
+
+### Health
+GET {{base}}/api/health
+
+### Add URL
+POST {{base}}/api/sources/url
+Content-Type: application/json
+
+{
+  "url": "https://www.locktonwattana.co.th/",
+  "company_code": "LOCKTON",
+  "run_deep_enrichment": true
+}
+
+### Chat
+POST {{base}}/api/chat
+Content-Type: application/json
+
+{
+  "question": "เว็บไซต์นี้มีข้อมูลอะไรบ้าง",
+  "company_code": "LOCKTON"
+}
+
+### Jobs
+GET {{base}}/api/jobs
+
+### Run pending jobs
+POST {{base}}/api/jobs/run-pending
+
+### Wiki pages
+GET {{base}}/api/wiki/pages?company_code=LOCKTON
