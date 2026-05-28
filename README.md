@@ -2,9 +2,9 @@
 
 # 🏢 Enterprise LLM Wiki
 
-**ระบบจัดการความรู้องค์กรแบบ RAG ครบวงจร**
+**ระบบจัดการความรู้องค์กรแบบ RAG ครบวงจร — v0.2.0**
 
-Chatbot · LLM Wiki · Knowledge Ingestion Pipeline · Multi-company
+Chatbot · LLM Wiki · Knowledge Graph · Multi-Crawler · Multi-company
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white)
@@ -19,75 +19,86 @@ Chatbot · LLM Wiki · Knowledge Ingestion Pipeline · Multi-company
 
 ## 📌 Overview
 
-Enterprise LLM Wiki เป็น **full-stack knowledge management platform** สำหรับองค์กร โดยรวมระบบหลัก 3 ส่วนเข้าด้วยกัน:
+Enterprise LLM Wiki เป็น **full-stack knowledge management platform** สำหรับองค์กร รวมระบบหลัก 4 ส่วน:
 
 | ระบบ | คำอธิบาย |
 |---|---|
-| 🤖 **RAG Chatbot** | ถาม-ตอบด้วย 4 ชั้นการค้นหา: Answer Cache → Canonical QA → Wiki → Chunk Search |
-| 📚 **LLM Wiki Generator** | นำ URL/ไฟล์เข้าระบบ → LLM สกัด Facts → สร้าง Wiki Page → สร้าง QA อัตโนมัติ |
-| ⚙️ **Knowledge Pipeline** | Background jobs สำหรับ Daily Crawl, Deep Enrichment, Embedding Rebuild |
+| 🤖 **RAG Chatbot** | ถาม-ตอบ 4 ชั้น: Answer Cache → Canonical QA → Wiki Search → Chunk Search |
+| 📚 **LLM Wiki Generator** | URL/ไฟล์ → Facts → Wiki Page → Canonical QA → Entity Relationships อัตโนมัติ |
+| 🕸️ **GraphRAG Knowledge Graph** | สกัด entity relationships ด้วย LLM → ขยาย context ผ่าน graph ตอน retrieval |
+| 🕷️ **Multi-Crawler Pipeline** | เลือก crawler backend ได้: Trafilatura · Playwright · crawl4ai — ต่อ request หรือ global |
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    🌐 Frontend (Next.js)                      │
-│         💬 Chat  │  ➕ Add URL  │  📖 Wiki  │  📊 Jobs        │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ REST API
-┌──────────────────────────▼──────────────────────────────────┐
-│                   ⚡ Backend (FastAPI)                        │
-│   /api/chat  │  /api/sources  │  /api/wiki  │  /api/jobs     │
-└──────┬───────────────────┬───────────────────┬──────────────┘
-       │                   │                   │
-┌──────▼──────┐   ┌────────▼────────┐   ┌──────▼────────────┐
-│  🔍 Retrieval│   │  📥 Ingest      │   │  🔄 Worker/Jobs   │
-│  Service    │   │  Pipeline       │   │  (APScheduler)    │
-│             │   │                 │   │                   │
-│ AnswerCache │   │ Crawl & Extract │   │ Fast Ingest       │
-│ CanonicalQA │   │ Chunk & Embed   │   │ Deep Enrichment   │
-│ WikiSearch  │   │ Wiki Generate   │   │ Daily Crawl       │
-│ ChunkSearch │   │ QA Generate     │   │ Embed Rebuild     │
-└──────┬──────┘   └────────┬────────┘   └───────────────────┘
-       │                   │
-┌──────▼───────────────────▼──────────────────────────────────┐
-│           🗄️ Supabase (PostgreSQL + pgvector)                │
-│  sources │ pages │ chunks │ wiki │ canonical_qa │ cache      │
-│  chat_sessions │ job_runs │ facts │ feedback                 │
-└──────────────────────────┬──────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                    🌐 Frontend (Next.js 14+)                       │
+│  💬 Chat │ 📖 Wiki Viewer │ ❓ QA Editor │ 🔗 Sources │ ⚙️ Jobs  │
+└───────────────────────────┬──────────────────────────────────────┘
+                            │ REST API
+┌───────────────────────────▼──────────────────────────────────────┐
+│                    ⚡ Backend (FastAPI v0.2.0)                     │
+│  /chat │ /sources │ /wiki │ /wiki/qa │ /jobs │ /companies        │
+└──────┬──────────────────┬───────────────────┬────────────────────┘
+       │                  │                   │
+┌──────▼──────┐  ┌────────▼─────────┐  ┌──────▼───────────────────┐
+│ 🔍 Retrieval │  │  📥 Ingest       │  │  🔄 Worker / Scheduler   │
+│  Service    │  │  Pipeline        │  │  (APScheduler)           │
+│             │  │                  │  │                          │
+│ AnswerCache │  │ ┌─ 🕷️ Crawlers ─┐ │  │ Daily Crawl (cron)       │
+│ CanonicalQA │  │ │ Trafilatura   │ │  │ Change Detection         │
+│ WikiSearch  │  │ │ Playwright    │ │  │ Pending Job Runner       │
+│ ChunkSearch │  │ │ crawl4ai      │ │  │                          │
+│ GraphExpand │  │ └───────────────┘ │  └──────────────────────────┘
+│ MetaBoost   │  │ Chunk & Embed    │
+└──────┬──────┘  │ Wiki Generate    │
+       │         │ QA Generate      │
+       │         │ Relationship Ext.│
+       │         └────────┬─────────┘
+┌──────▼──────────────────▼──────────────────────────────────────┐
+│              🗄️ Supabase (PostgreSQL + pgvector)                 │
+│  wiki_pages · canonical_qa · document_chunks · wiki_relationships│
+│  knowledge_sources · source_pages · answer_cache · job_runs     │
+└──────────────────────────┬─────────────────────────────────────┘
                            │
-┌──────────────────────────▼──────────────────────────────────┐
-│                     🤖 Ollama                                 │
-│   ☁️ Cloud  →  Chat / Wiki / QA / Fact Extraction            │
-│   💻 Local  →  Embeddings (nomic-embed-text · 768d)          │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────▼─────────────────────────────────────┐
+│                         🤖 Ollama                                │
+│  ☁️ Cloud → Chat / Wiki / QA / Fact / Relationship Extraction   │
+│  💻 Local → Embeddings (nomic-embed-text · 768d)                │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 🔄 Core Flows
 
-### 📥 Ingest Flow
+### 📥 Ingest Flow (with Multi-Crawler)
 
 ```
 URL / File
   │
-  ├─ 🕷️  Crawl & Extract     (Trafilatura / BeautifulSoup)
-  ├─ 🧹  Clean → Markdown
+  ├─ 🔍  Change Detection    (content_hash — skip if unchanged)
+  │
+  ├─ 🕷️  Crawler (เลือกได้)
+  │       ├─ Trafilatura     httpx + trafilatura  → static HTML (default, เร็วที่สุด)
+  │       ├─ Playwright      headless Chromium    → JavaScript SPA
+  │       └─ crawl4ai        LLM-aware crawler    → Markdown คุณภาพสูงสุด
+  │
   ├─ ✂️  Chunk               (LangChain Text Splitter)
   ├─ 🔢  Embed               (Ollama Local · nomic-embed-text · 768d)
-  ├─ 💾  Save document_chunks              ✅ status: searchable
+  ├─ 💾  Save document_chunks + source_pages           ✅ searchable
   │
-  ├─ 🧠  Extract Facts       (LLM)
-  ├─ 📖  Generate Wiki Page  (LLM)
+  ├─ 🧠  Extract Facts        (LLM)
+  ├─ 📖  Generate Wiki Page   (LLM)
   ├─ ❓  Generate Canonical QA (LLM)
+  ├─ 🕸️  Extract Relationships (LLM → entity graph)
   ├─ 🔢  Embed Wiki & QA
-  └─ 💾  Save wiki_pages + canonical_qa    ✅ status: enriched
+  └─ 💾  Save wiki_pages + canonical_qa + wiki_relationships  ✅ enriched
 ```
 
-### 💬 Chat Flow
+### 💬 Chat Flow (with GraphRAG)
 
 ```
 Question
@@ -95,12 +106,95 @@ Question
   ├─ [1] 🗃️  Answer Cache Search     threshold: 0.96  → ✅ return cached
   ├─ [2] ❓  Canonical QA Search      threshold: 0.90  → ✅ return QA answer
   ├─ [3] 📖  Wiki Page Vector Search  top_k: 20
-  │          Document Chunk Search   top_k: 20
+  │          Document Chunk Search    top_k: 20
+  ├─ [4] 🕸️  Graph Expansion (GraphRAG)
+  │          └─ wiki_relationships → find related entities → fetch related wiki pages
+  ├─      🏷️  Metadata Boost         title/slug keyword scoring
   ├─      📊  Merge & Sort by similarity → Top 5
-  ├─ [4] 🔀  Reranker (FlashRank)    optional
   ├─      🤖  LLM → Grounded Answer
-  └─      💾  Save to answer_cache + chat_messages
+  └─      💾  Save to answer_cache
 ```
+
+---
+
+## 🕷️ Multi-Crawler Backends
+
+ระบบรองรับ 3 crawler backends เลือกได้ทั้งแบบ global (`.env`) และ per-request (API):
+
+| Backend | Engine | JS Render | ความเร็ว | คุณภาพ Markdown |
+|---|---|---|---|---|
+| `trafilatura` | httpx + trafilatura | ❌ | ⚡ เร็วมาก | ดี (เหมาะ static HTML) |
+| `playwright` | Headless Chromium | ✅ | 🐢 ช้ากว่า | ดี (render แล้วสกัด) |
+| `crawl4ai` | Patchright + LLM-aware | ✅ | 🐢 ช้ากว่า | ⭐ ดีที่สุด (LLM-optimised) |
+
+### ตั้งค่า Global Default
+
+```env
+# .env
+CRAWLER_BACKEND=trafilatura   # trafilatura | playwright | crawl4ai
+```
+
+### Override ต่อ Request (API)
+
+```json
+POST /api/sources/url
+{
+  "url": "https://example.com",
+  "crawler_backend": "crawl4ai"
+}
+```
+
+### ติดตั้ง Playwright และ crawl4ai
+
+```bash
+pip install playwright crawl4ai
+
+# Playwright: ติดตั้ง Chromium
+playwright install chromium
+
+# crawl4ai: ติดตั้ง patchright Chromium
+patchright install chromium
+```
+
+---
+
+## 🕸️ GraphRAG — Knowledge Graph
+
+ระบบสกัด **entity relationships** ด้วย LLM จากทุก wiki page และสร้างเป็น knowledge graph:
+
+```
+Wiki Page  →  LLM Extract  →  wiki_relationships table
+                              (source_entity, target_entity, type, weight)
+
+Relationship Types:
+  has_coverage · requires · part_of · related_to · applies_to
+  excludes · contacts · located_at · replaces · depends_on
+```
+
+ตอน retrieval ระบบจะ **ขยาย context** โดยเดินตาม graph:
+
+```
+Vector Search Result  →  find related entities (graph)  →  fetch related wiki pages
+                                                            (similarity=0.5, lower priority)
+```
+
+เปิดใช้งาน:
+
+```env
+ENABLE_RELATIONSHIP_SEARCH=true
+```
+
+---
+
+## 🎨 Frontend Pages
+
+| หน้า | URL | ฟีเจอร์ |
+|---|---|---|
+| 💬 **Chat** | `/` | Message history · typing indicator · source chips · mode badges · Force RAG |
+| 📖 **Wiki Viewer** | `/wiki` | Browse + search · ดู full content · แก้ไข · ลบ |
+| ❓ **QA Editor** | `/qa` | List/Create/Edit/Delete QA · toggle active · pagination · search |
+| 🔗 **Sources** | `/sources` | Add URL · Upload file · Crawler selector (3 backends) · deactivate |
+| ⚙️ **Jobs** | `/jobs` | Status monitor · auto-refresh · crawl trigger · expand job details |
 
 ---
 
@@ -108,19 +202,21 @@ Question
 
 | Layer | Technology | Purpose |
 |---|---|---|
-| 🐍 Backend | Python 3.11+, FastAPI, Uvicorn | REST API Server |
-| 🌐 Frontend | Next.js 14+, TypeScript, Tailwind CSS | Web UI |
+| 🐍 Backend | Python 3.11+, FastAPI 0.115, Uvicorn | REST API Server |
+| 🌐 Frontend | Next.js 14+, TypeScript, Tailwind CSS | Web UI (5 pages) |
 | 🗄️ Database | Supabase Cloud, PostgreSQL | Primary Data Store |
-| 🔍 Vector Search | pgvector + IVFFlat index | ANN Similarity Search |
-| 🤖 LLM (Chat/Wiki/QA) | Ollama Cloud `gpt-oss:20b-cloud` | Generation |
+| 🔍 Vector Search | pgvector + IVFFlat index | ANN Similarity Search (768d cosine) |
+| 🤖 LLM (Chat/Wiki/QA/Graph) | Ollama Cloud `gpt-oss:20b-cloud` | Generation |
 | 🔢 Embeddings | Ollama Local `nomic-embed-text` 768d | Vectorization |
-| 🕷️ Crawling | Trafilatura, BeautifulSoup4, Markdownify | Web Extraction |
+| 🕷️ Crawler 1 | Trafilatura + httpx + BeautifulSoup4 | Static HTML extraction (default) |
+| 🎭 Crawler 2 | Playwright 1.60 + Chromium | JS-rendered pages |
+| 🤖 Crawler 3 | crawl4ai 0.8.6 + Patchright | LLM-aware Markdown extraction |
 | ✂️ Chunking | LangChain Text Splitters | Document Splitting |
-| 📄 File Parsing | pypdf, python-docx, openpyxl | PDF/DOCX/XLSX |
-| ⏰ Jobs | APScheduler | Background Scheduling |
-| 🔀 Reranker | FlashRank *(optional)* | Cross-encoder Rerank |
+| 📄 File Parsing | pypdf, python-docx, openpyxl | PDF / DOCX / XLSX |
+| ⏰ Jobs | APScheduler 3.11 | Background Scheduling (daily cron) |
+| 🔀 Reranker | FlashRank *(optional)* | Cross-encoder Reranking |
 | 🐳 Deploy | Docker, Docker Compose | Containerization |
-| 🔁 CI/CD | GitHub Actions | Automated Testing |
+| 🔁 CI/CD | GitHub Actions | Auto test on push (main + master) |
 
 ---
 
@@ -129,17 +225,17 @@ Question
 | Table | Description |
 |---|---|
 | `companies` | 🏢 Multi-tenant company registry |
-| `knowledge_sources` | 📌 Source registry (URL / file / wiki) |
-| `source_pages` | 📄 Raw crawled pages + content hash for change detection |
+| `knowledge_sources` | 📌 Source registry (URL / file) |
+| `source_pages` | 📄 Raw crawled pages + `content_hash` สำหรับ change detection |
 | `document_chunks` | 🧩 Text chunks with 768d vector embeddings |
 | `extracted_facts` | 🧠 Structured facts extracted by LLM |
 | `wiki_pages` | 📖 LLM-generated wiki pages with vector embeddings |
-| `canonical_qa` | ❓ Curated Q&A pairs derived from wiki pages |
+| `canonical_qa` | ❓ Curated Q&A pairs with embeddings (CRUD-able) |
+| `wiki_relationships` | 🕸️ **Entity relationship graph** — GraphRAG knowledge graph |
 | `answer_cache` | 🗃️ Semantic answer cache (avoids redundant LLM calls) |
-| `wiki_relationships` | 🕸️ Entity relationship graph between wiki topics |
+| `job_runs` | 📊 Background job execution logs |
 | `chat_sessions` | 💬 Chat session metadata |
 | `chat_messages` | 📝 Individual messages per session |
-| `job_runs` | 📊 Background job execution logs |
 | `user_feedback` | ⭐ User rating & feedback on answers |
 
 > All vector columns use `ivfflat` index with `vector_cosine_ops` for fast ANN search.
@@ -153,7 +249,7 @@ Question
 - 🐍 Python 3.11+
 - 🟢 Node.js 20+
 - ☁️ [Supabase](https://supabase.com) project (pgvector enabled)
-- 🤖 [Ollama](https://ollama.com) running locally (for embeddings)
+- 🤖 Ollama running locally for embeddings
 
 ### 1️⃣ Clone & Configure
 
@@ -161,7 +257,7 @@ Question
 git clone https://github.com/YOUR_USERNAME/enterprise-llm-wiki.git
 cd enterprise-llm-wiki
 cp .env.example .env
-# แก้ไข .env ด้วย Supabase URL, service role key และ Ollama settings
+# แก้ไข .env ตาม Configuration Reference ด้านล่าง
 ```
 
 ### 2️⃣ Setup Database
@@ -186,6 +282,11 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+
+# ติดตั้ง browser engines สำหรับ Playwright / crawl4ai (optional)
+playwright install chromium
+patchright install chromium
+
 uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
@@ -215,7 +316,9 @@ cp .env.example .env
 docker compose up --build
 ```
 
-เปิด 3 containers: `backend` (8080) · `frontend` (3000) · `worker` (job runner)
+เปิด 3 containers: `backend` (8080) · `frontend` (3000) · `worker` (job daemon loop ทุก 10s)
+
+> Worker จะ poll `job_runs` ทุก 10 วินาที — ทำงานเป็น daemon ไม่หยุด
 
 ---
 
@@ -226,7 +329,7 @@ docker compose up --build
 ```env
 # Supabase
 SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=YOUR_KEY
+SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY   # ต้องเป็น service_role ไม่ใช่ anon
 
 # Ollama Cloud (Chat, Wiki, QA, Fact Extraction)
 OLLAMA_BASE_URL=https://ollama.com
@@ -239,47 +342,112 @@ OLLAMA_EMBED_MODEL=nomic-embed-text
 EMBEDDING_DIM=768
 ```
 
+### Crawler Settings
+
+```env
+# เลือก crawler default: trafilatura | playwright | crawl4ai
+CRAWLER_BACKEND=trafilatura
+```
+
 ### Retrieval Tuning
 
 ```env
-DEFAULT_COMPANY_CODE=LOCKTON
-RETRIEVAL_TOP_K=20          # จำนวน candidates ก่อน rerank
-RERANK_TOP_K=5              # จำนวน context ส่งให้ LLM
-CANONICAL_THRESHOLD=0.90    # ความคล้ายขั้นต่ำสำหรับ canonical QA
-ANSWER_CACHE_THRESHOLD=0.96 # ความคล้ายขั้นต่ำสำหรับ cache hit
-SIMILARITY_THRESHOLD=0.35   # ความคล้ายขั้นต่ำสำหรับ vector search
+DEFAULT_COMPANY_CODE=DEVES
+RETRIEVAL_TOP_K=20           # จำนวน candidates ก่อน rerank
+RERANK_TOP_K=5               # จำนวน context ส่งให้ LLM
+CANONICAL_THRESHOLD=0.90     # ความคล้ายขั้นต่ำสำหรับ canonical QA
+ANSWER_CACHE_THRESHOLD=0.96  # ความคล้ายขั้นต่ำสำหรับ cache hit
+SIMILARITY_THRESHOLD=0.35    # ความคล้ายขั้นต่ำสำหรับ vector search
+```
+
+### Scheduler Settings
+
+```env
+ENABLE_SCHEDULER=true
+DAILY_CRAWL_CRON_HOUR=2      # ชั่วโมงที่รัน daily crawl (0-23)
+DAILY_CRAWL_CRON_MINUTE=0    # นาทีที่รัน
 ```
 
 ### 🎛️ Feature Flags
 
 | Flag | Default | Description |
 |---|---|---|
-| `ENABLE_ANSWER_CACHE` | `true` | 🗃️ Semantic cache (fastest path) |
+| `ENABLE_ANSWER_CACHE` | `true` | 🗃️ Semantic cache — fastest retrieval path |
 | `ENABLE_CANONICAL_QA` | `true` | ❓ Pre-generated QA lookup before RAG |
 | `ENABLE_WIKI_SEARCH` | `true` | 📖 Include wiki pages in context retrieval |
-| `ENABLE_CHUNK_SEARCH` | `true` | 🧩 Include raw chunks in context retrieval |
+| `ENABLE_CHUNK_SEARCH` | `true` | 🧩 Include raw document chunks in retrieval |
+| `ENABLE_RELATIONSHIP_SEARCH` | `true` | 🕸️ GraphRAG — graph-based context expansion |
+| `ENABLE_METADATA_SEARCH` | `true` | 🏷️ Boost score ด้วย title/slug keyword matching |
 | `ENABLE_RERANKER` | `false` | 🔀 FlashRank cross-encoder reranking |
 | `ENABLE_QUERY_REWRITE` | `false` | ✏️ LLM-based query rewriting |
 | `ENABLE_GROUNDING` | `true` | 📌 Source-grounded answer generation |
-| `ENABLE_RELATIONSHIP_SEARCH` | `false` | 🕸️ Graph-based entity relationship search |
-| `ENABLE_METADATA_SEARCH` | `true` | 🏷️ Metadata-aware retrieval |
+| `ENABLE_SCHEDULER` | `true` | ⏰ APScheduler daily crawl |
 
 ---
 
 ## 📋 API Endpoints
 
+### 💬 Chat
+
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/chat` | 💬 Ask a question (RAG chatbot) |
-| `POST` | `/api/sources/url` | ➕ Add URL → trigger ingest pipeline |
-| `GET` | `/api/sources` | 📋 List all knowledge sources |
-| `GET` | `/api/wiki` | 📖 List wiki pages |
-| `GET` | `/api/wiki/{id}` | 🔍 Get a single wiki page |
-| `GET` | `/api/jobs` | 📊 List background jobs |
-| `GET` | `/api/jobs/{id}` | 🔎 Get job status |
-| `GET` | `/health` | 💚 Health check |
+| `POST` | `/api/chat` | ถามคำถาม — 4-layer RAG + GraphRAG |
 
-> ดู interactive docs ได้ที่ `http://localhost:8080/docs`
+### 🔗 Sources
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/sources` | List knowledge sources |
+| `POST` | `/api/sources/url` | Ingest URL (+ `crawler_backend` override) |
+| `POST` | `/api/sources/file` | Upload file (PDF/DOCX/XLSX/TXT/MD) |
+| `GET` | `/api/sources/backends` | List crawler backends + current default |
+| `GET` | `/api/sources/{id}/pages` | List pages of a source |
+| `DELETE` | `/api/sources/{id}` | Deactivate source |
+
+### 📖 Wiki
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/wiki/pages` | List wiki pages (filter: `q`, `status`) |
+| `GET` | `/api/wiki/pages/{id}` | Get wiki page detail |
+| `PUT` | `/api/wiki/pages/{id}` | Update wiki page |
+| `DELETE` | `/api/wiki/pages/{id}` | Delete wiki page |
+
+### ❓ Canonical QA
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/wiki/qa` | List QA (filter: `q`, `wiki_page_id`) |
+| `POST` | `/api/wiki/qa` | Create QA (auto-embed) |
+| `PUT` | `/api/wiki/qa/{id}` | Edit QA (re-embed question) |
+| `DELETE` | `/api/wiki/qa/{id}` | Delete QA |
+
+### 🕸️ Relationships
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/wiki/relationships` | List entity relationships (filter: `entity`, `rel_type`) |
+| `DELETE` | `/api/wiki/relationships/{id}` | Delete relationship |
+
+### ⚙️ Jobs
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/jobs` | List jobs (filter: `status`, `company_code`) |
+| `GET` | `/api/jobs/{id}` | Get job detail |
+| `POST` | `/api/jobs/run-pending` | Run pending jobs now |
+| `POST` | `/api/jobs/crawl-all` | Trigger manual crawl all sources |
+| `DELETE` | `/api/jobs/{id}` | Delete job log |
+
+### 🏢 Companies
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/companies` | List companies |
+| `POST` | `/api/companies` | Create / upsert company |
+| `DELETE` | `/api/companies/{code}` | Deactivate company |
+
+> ดู interactive docs ทั้งหมดได้ที่ `http://localhost:8080/docs`
 
 ---
 
@@ -290,20 +458,48 @@ enterprise-llm-wiki/
 │
 ├── 🐍 backend/
 │   ├── app/
-│   │   ├── api/          # FastAPI route handlers
-│   │   ├── core/         # Config, logging, text utilities
-│   │   ├── db/           # Supabase client
-│   │   ├── jobs/         # Job runner (APScheduler)
-│   │   ├── pipeline/     # Ingest pipeline orchestrator
-│   │   ├── schemas/      # Pydantic request/response models
-│   │   └── services/     # Business logic (chat, retrieval, wiki, QA...)
-│   ├── scripts/          # Utility & test scripts
-│   ├── sql/              # Database migration scripts
+│   │   ├── api/               # FastAPI route handlers
+│   │   │   ├── chat.py
+│   │   │   ├── sources.py     # URL + file upload
+│   │   │   ├── wiki.py        # wiki pages + QA + relationships
+│   │   │   ├── jobs.py        # job monitor + crawl trigger
+│   │   │   ├── companies.py   # multi-tenant management
+│   │   │   └── health.py
+│   │   ├── core/              # Config, logging, text utilities
+│   │   ├── db/                # Supabase client
+│   │   ├── jobs/              # APScheduler + job runner daemon
+│   │   ├── pipeline/          # Ingest pipeline (URL + file)
+│   │   ├── schemas/           # Pydantic models
+│   │   └── services/
+│   │       ├── crawlers/      # Multi-crawler backends
+│   │       │   ├── base.py
+│   │       │   ├── trafilatura_crawler.py
+│   │       │   ├── playwright_crawler.py
+│   │       │   ├── crawl4ai_crawler.py
+│   │       │   └── factory.py
+│   │       ├── crawler_service.py    # façade
+│   │       ├── retrieval_service.py  # 4-layer + GraphRAG
+│   │       ├── relationship_service.py  # entity graph
+│   │       ├── wiki_service.py
+│   │       ├── qa_service.py
+│   │       ├── chat_service.py
+│   │       ├── extraction_service.py
+│   │       ├── chunking_service.py
+│   │       ├── file_loader_service.py
+│   │       └── job_service.py
+│   ├── scripts/
+│   ├── sql/
 │   ├── requirements.txt
 │   └── Dockerfile
 │
 ├── 🌐 frontend/
-│   ├── app/              # Next.js App Router pages
+│   ├── app/
+│   │   ├── page.tsx           # 💬 Chat (message history, source chips)
+│   │   ├── wiki/page.tsx      # 📖 Wiki Viewer (search, edit, delete)
+│   │   ├── qa/page.tsx        # ❓ QA Editor (CRUD + pagination)
+│   │   ├── sources/page.tsx   # 🔗 Sources (crawler selector)
+│   │   ├── jobs/page.tsx      # ⚙️ Job Monitor (auto-refresh)
+│   │   └── layout.tsx         # Nav bar (responsive)
 │   ├── package.json
 │   └── Dockerfile
 │
@@ -311,6 +507,7 @@ enterprise-llm-wiki/
 │   ├── ARCHITECTURE.md
 │   ├── TECHNOLOGY_STACK.md
 │   ├── ROADMAP.md
+│   ├── COMPLETE_PROJECT_INSTRUCTION.md
 │   └── API_EXAMPLES.http
 │
 ├── .env.example
@@ -325,20 +522,21 @@ enterprise-llm-wiki/
 
 | Phase | Status | Description |
 |---|---|---|
-| Phase 1 — MVP | ✅ Done | URL ingest, chunking, embedding, vector search, chat API, basic frontend |
+| Phase 1 — MVP | ✅ Done | URL ingest, chunking, embedding, vector search, chat API |
 | Phase 2 — LLM Wiki | ✅ Done | Fact extraction, wiki generation, canonical QA |
-| Phase 3 — Enterprise Jobs | 🔄 In Progress | Daily crawl, change detection, job monitor, batch processing |
-| Phase 4 — Production | 📋 Planned | Auth, RLS per company, audit logs, evaluation, human review |
-| Phase 5 — Agentic | 📋 Planned | LangGraph planner, multi-step retrieval, validation agent, GraphRAG |
+| Phase 3 — Enterprise Jobs | ✅ Done | Multi-crawler, APScheduler, change detection, file upload, job monitor UI |
+| Phase 3.5 — GraphRAG | ✅ Done | Entity relationship extraction, graph expansion in retrieval, QA CRUD, full frontend |
+| Phase 4 — Production | 📋 Planned | Authentication, RLS per company, audit logs, evaluation (Ragas/DeepEval), human review |
+| Phase 5 — Agentic | 📋 Planned | LangGraph planner, multi-step retrieval, validation agent, full GraphRAG traversal |
 
 ---
 
 ## 🔐 Security Notes
 
-> ⚠️ **สิ่งที่ต้องระวังก่อน push ขึ้น GitHub**
+> ⚠️ **สิ่งที่ต้องระวังก่อน deploy**
 
-- ❌ ห้าม commit ไฟล์ `.env` ขึ้น version control
-- 🔑 `SUPABASE_SERVICE_ROLE_KEY` ใช้ได้เฉพาะ **backend/worker** เท่านั้น — ห้ามส่งไป frontend หรือ browser
+- ❌ ห้าม commit ไฟล์ `.env` — `.gitignore` ป้องกันไว้แล้ว
+- 🔑 `SUPABASE_SERVICE_ROLE_KEY` ใช้ได้เฉพาะ **backend/worker** — ห้ามส่งไป frontend หรือ browser
 - 🌐 Production ควรกำหนด `ALLOW_ORIGINS` ให้เฉพาะ frontend domain จริง
 - 🛡️ เปิด Supabase Row Level Security (RLS) ต่อ company สำหรับ multi-tenant isolation
 
@@ -348,22 +546,22 @@ enterprise-llm-wiki/
 
 | ไฟล์ | คำอธิบาย |
 |---|---|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 🏗️ ภาพรวม architecture, module map, ingest flow, chat flow และ service dependencies |
-| [TECHNOLOGY_STACK.md](docs/TECHNOLOGY_STACK.md) | 🛠️ รายละเอียด library และ technology ทุกตัวพร้อม version |
-| [ROADMAP.md](docs/ROADMAP.md) | 🗺️ แผนพัฒนา 5 phases พร้อม status ปัจจุบัน |
-| [COMPLETE_PROJECT_INSTRUCTION.md](docs/COMPLETE_PROJECT_INSTRUCTION.md) | 🤖 Task brief สำหรับ developer — requirements, backlog และ coding style |
-| [API_EXAMPLES.http](docs/API_EXAMPLES.http) | 📋 ตัวอย่าง HTTP requests สำหรับทดสอบ API ทุก endpoint |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 🏗️ Architecture, module map, ingest/chat flow, service dependencies |
+| [TECHNOLOGY_STACK.md](docs/TECHNOLOGY_STACK.md) | 🛠️ Library ทุกตัวพร้อม version และ role |
+| [ROADMAP.md](docs/ROADMAP.md) | 🗺️ แผนพัฒนา 5 phases พร้อม status |
+| [COMPLETE_PROJECT_INSTRUCTION.md](docs/COMPLETE_PROJECT_INSTRUCTION.md) | 🤖 Task brief, requirements, backlog, coding style |
+| [API_EXAMPLES.http](docs/API_EXAMPLES.http) | 📋 ตัวอย่าง HTTP requests สำหรับทดสอบทุก endpoint |
 
 ---
 
 ## 📄 License
 
-MIT © 2024
+MIT © 2024–2025
 
 ---
 
 <div align="center">
 
-Built with ❤️ using FastAPI · Next.js · Supabase · Ollama
+Built with ❤️ using FastAPI · Next.js · Supabase · Ollama · crawl4ai · Playwright
 
 </div>
