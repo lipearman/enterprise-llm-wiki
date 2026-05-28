@@ -8,8 +8,8 @@ POST {{base}}/api/sources/url
 Content-Type: application/json
 
 {
-  "url": "https://www.locktonwattana.co.th/",
-  "company_code": "LOCKTON",
+  "url": "https://www.deves.co.th/",
+  "company_code": "DEVES",
   "run_deep_enrichment": true
 }
 
@@ -19,7 +19,7 @@ Content-Type: application/json
 
 {
   "question": "เว็บไซต์นี้มีข้อมูลอะไรบ้าง",
-  "company_code": "LOCKTON"
+  "company_code": "DEVES"
 }
 
 ### Jobs
@@ -29,4 +29,4 @@ GET {{base}}/api/jobs
 POST {{base}}/api/jobs/run-pending
 
 ### Wiki pages
-GET {{base}}/api/wiki/pages?company_code=LOCKTON
+GET {{base}}/api/wiki/pages?company_code=DEVES
