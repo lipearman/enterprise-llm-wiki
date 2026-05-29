@@ -182,6 +182,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <title>Enterprise LLM Wiki</title>
         <meta name="description" content="Enterprise LLM Wiki Platform" />
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+        <link rel="icon" href="/favicon.ico" type="image/x-icon" />
       </head>
       <body className="min-h-screen bg-slate-100 dark:bg-slate-950 transition-colors duration-200">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>

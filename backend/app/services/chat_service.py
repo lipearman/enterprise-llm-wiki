@@ -206,7 +206,7 @@ class ChatService:
             session_store.save(session_id, question, answer)
 
         # Don't show source refs when the LLM signals it found nothing useful
-        no_answer = "ยังไม่มีข้อมูล" in answer
+        no_answer = self._is_no_answer(answer, context_rows)
         source_refs = [] if no_answer else self._build_source_refs(context_rows)
 
         # Track unanswered questions (floating-chat only)
@@ -405,44 +405,45 @@ class ChatService:
             yield {"done": True, "sources": []}
             return
 
-        # ── Heartbeat #1 — before query-rewrite LLM call (can be slow) ───
-        yield {"status": "thinking"}
-        retrieval_q = await self._build_retrieval_query(question, history)
-
-        # ── Answer cache ──────────────────────────────────────────────────
-        if not force_rag:
-            yield {"status": "thinking"}
-            cached = await retrieval_service.match_answer_cache(retrieval_q, company_code)
-            if cached:
-                if session_id:
-                    session_store.save(session_id, question, cached["answer"])
-                yield {"token": cached["answer"]}
-                yield {"done": True, "sources": []}
-                return
-
-            # ── Canonical Q&A (may call local LLM for matching) ──────────
-            yield {"status": "thinking"}
-            qa = await retrieval_service.match_canonical_qa(retrieval_q, company_code)
-            if qa:
-                if session_id:
-                    session_store.save(session_id, question, qa["answer"])
-                yield {"token": qa["answer"]}
-                yield {"done": True, "sources": []}
-                return
-
-        # ── RAG retrieval (embedding + Supabase + text search) ────────────
-        yield {"status": "thinking"}
-        context_rows = await retrieval_service.search_context(retrieval_q, company_code)
-        context = self._build_context(context_rows)
-
-        full_answer = ""
         try:
+            # ── Heartbeat #1 — before query-rewrite LLM call (can be slow) ──
+            yield {"status": "thinking"}
+            retrieval_q = await self._build_retrieval_query(question, history)
+
+            # ── Answer cache ──────────────────────────────────────────────
+            if not force_rag:
+                yield {"status": "thinking"}
+                cached = await retrieval_service.match_answer_cache(retrieval_q, company_code)
+                if cached:
+                    if session_id:
+                        session_store.save(session_id, question, cached["answer"])
+                    yield {"token": cached["answer"]}
+                    yield {"done": True, "sources": []}
+                    return
+
+                # ── Canonical Q&A (may call local LLM for matching) ──────
+                yield {"status": "thinking"}
+                qa = await retrieval_service.match_canonical_qa(retrieval_q, company_code)
+                if qa:
+                    if session_id:
+                        session_store.save(session_id, question, qa["answer"])
+                    yield {"token": qa["answer"]}
+                    yield {"done": True, "sources": []}
+                    return
+
+            # ── RAG retrieval (embedding + Supabase + text search) ────────
+            yield {"status": "thinking"}
+            context_rows = await retrieval_service.search_context(retrieval_q, company_code)
+            context = self._build_context(context_rows)
+
+            full_answer = ""
             async for token in self._generate_answer_stream(retrieval_q, context, history):
                 full_answer += token
                 yield {"token": token}
+
         except Exception as exc:
-            logger.error("stream:llm_error | %s: %s", type(exc).__name__, exc)
-            err = "ขออภัยครับ ขณะนี้ระบบ AI ขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง"
+            logger.error("stream:pipeline_error | %s: %s", type(exc).__name__, exc, exc_info=True)
+            err = f"ขออภัยครับ ระบบขัดข้องชั่วคราว ({type(exc).__name__}: {exc})"
             yield {"token": err}
             yield {"done": True, "sources": []}
             return
@@ -455,7 +456,7 @@ class ChatService:
         except Exception as exc:
             logger.warning("stream:cache_save_error | %s: %s", type(exc).__name__, exc)
 
-        no_answer = "ยังไม่มีข้อมูล" in full_answer
+        no_answer = self._is_no_answer(full_answer, context_rows)
         source_refs = [] if no_answer else self._build_source_refs(context_rows)
 
         # Track unanswered questions (floating-chat only)
@@ -479,24 +480,26 @@ class ChatService:
             "ห้ามใช้ความรู้ทั่วไปหรือข้อมูลนอก CONTEXT เด็ดขาด "
             "คุณจำบทสนทนาก่อนหน้าได้และสามารถอ้างอิงได้"
         )
-        current_prompt = f"""กฎเหล็ก (ต้องทำตามทุกข้อ):
-1. ตอบได้เฉพาะจาก CONTEXT ด้านล่างเท่านั้น — ห้ามใช้ความรู้ทั่วไปหรือข้อมูลภายนอกเด็ดขาด
-2. ถ้า CONTEXT ไม่มีข้อมูลที่เกี่ยวข้องกับคำถาม → ตอบว่า "ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ" ทันที ห้ามแต่งคำตอบ
-3. ถามว่า "มีไหม / มีหรือเปล่า" → ขึ้นต้นด้วย "มีครับ" หรือ "ไม่มีครับ" แล้วอธิบายจาก CONTEXT
-4. ถามว่า "ได้ไหม / ทำได้ไหม" → ขึ้นต้นด้วย "ได้ครับ" หรือ "ไม่ได้ครับ" แล้วอธิบายจาก CONTEXT
-5. ถามว่า "ใช่ไหม / จริงไหม" → ขึ้นต้นด้วย "ใช่ครับ" หรือ "ไม่ใช่ครับ"
-6. อย่าใช้ประโยค "ไม่พบข้อมูลในฐานความรู้"
-7. ถ้าคำถามอ้างอิงบทสนทนาก่อนหน้า ให้ใช้ประวัติด้านบนประกอบการตอบ
-8. ถ้าคำถามกว้าง ให้ถามกลับ 1 คำถาม
-9. ถ้ามีขั้นตอน ให้เรียงเป็นข้อ
-10. ตอบสั้น กระชับ ภาษาสุภาพ เป็นกันเอง
+        current_prompt = f"""[ขั้นตอนบังคับ — ทำตามลำดับนี้เท่านั้น]
+
+ขั้นที่ 1 (ตรวจสอบก่อนเสมอ): CONTEXT ด้านล่างมีข้อมูลที่เกี่ยวข้องกับคำถามนี้โดยตรงไหม?
+  → ถ้า **ไม่มี** → ตอบว่า "ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ" แล้วหยุด ห้ามต่อเติม ห้ามใช้ข้อ 1-8
+  → ถ้า **มี**    → ทำขั้นที่ 2 ต่อไป
+
+ขั้นที่ 2 (ตอบจาก CONTEXT เท่านั้น):
+1. ห้ามใช้ความรู้ทั่วไปหรือข้อมูลภายนอก CONTEXT เด็ดขาด
+2. ถามว่า "มีไหม / มีหรือเปล่า" → ขึ้นต้นด้วย "มีครับ" หรือ "ไม่มีครับ" แล้วอธิบายจาก CONTEXT
+3. ถามว่า "ได้ไหม / ทำได้ไหม" → ขึ้นต้นด้วย "ได้ครับ" หรือ "ไม่ได้ครับ" แล้วอธิบายจาก CONTEXT
+4. ถามว่า "ใช่ไหม / จริงไหม" → ขึ้นต้นด้วย "ใช่ครับ" หรือ "ไม่ใช่ครับ"
+5. อย่าใช้ประโยค "ไม่พบข้อมูลในฐานความรู้"
+6. ถ้าคำถามอ้างอิงบทสนทนาก่อนหน้า ให้ใช้ประวัติด้านบนประกอบการตอบ
+7. ถ้าคำถามกว้าง ให้ถามกลับ 1 คำถาม
+8. ถ้ามีขั้นตอน ให้เรียงเป็นข้อ ตอบสั้น กระชับ ภาษาสุภาพ เป็นกันเอง
 
 CONTEXT (ใช้ได้เฉพาะข้อมูลจากส่วนนี้เท่านั้น):
 {context}
 
-QUESTION: {question}
-
-[ตรวจสอบก่อนตอบ: CONTEXT มีข้อมูลที่ตอบคำถามนี้ได้ไหม? ถ้าไม่มี → ตอบว่า "ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ"]"""
+QUESTION: {question}"""
 
         messages: list[dict] = [{"role": "system", "content": system_msg}]
         messages.extend(history)
@@ -517,24 +520,26 @@ QUESTION: {question}
             "คุณจำบทสนทนาก่อนหน้าได้และสามารถอ้างอิงได้"
         )
 
-        current_prompt = f"""กฎเหล็ก (ต้องทำตามทุกข้อ):
-1. ตอบได้เฉพาะจาก CONTEXT ด้านล่างเท่านั้น — ห้ามใช้ความรู้ทั่วไปหรือข้อมูลภายนอกเด็ดขาด
-2. ถ้า CONTEXT ไม่มีข้อมูลที่เกี่ยวข้องกับคำถาม → ตอบว่า "ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ" ทันที ห้ามแต่งคำตอบ
-3. ถามว่า "มีไหม / มีหรือเปล่า" → ขึ้นต้นด้วย "มีครับ" หรือ "ไม่มีครับ" แล้วอธิบายจาก CONTEXT
-4. ถามว่า "ได้ไหม / ทำได้ไหม" → ขึ้นต้นด้วย "ได้ครับ" หรือ "ไม่ได้ครับ" แล้วอธิบายจาก CONTEXT
-5. ถามว่า "ใช่ไหม / จริงไหม" → ขึ้นต้นด้วย "ใช่ครับ" หรือ "ไม่ใช่ครับ"
-6. อย่าใช้ประโยค "ไม่พบข้อมูลในฐานความรู้"
-7. ถ้าคำถามอ้างอิงบทสนทนาก่อนหน้า ให้ใช้ประวัติด้านบนประกอบการตอบ
-8. ถ้าคำถามกว้าง ให้ถามกลับ 1 คำถาม
-9. ถ้ามีขั้นตอน ให้เรียงเป็นข้อ
-10. ตอบสั้น กระชับ ภาษาสุภาพ เป็นกันเอง
+        current_prompt = f"""[ขั้นตอนบังคับ — ทำตามลำดับนี้เท่านั้น]
+
+ขั้นที่ 1 (ตรวจสอบก่อนเสมอ): CONTEXT ด้านล่างมีข้อมูลที่เกี่ยวข้องกับคำถามนี้โดยตรงไหม?
+  → ถ้า **ไม่มี** → ตอบว่า "ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ" แล้วหยุด ห้ามต่อเติม ห้ามใช้ข้อ 1-8
+  → ถ้า **มี**    → ทำขั้นที่ 2 ต่อไป
+
+ขั้นที่ 2 (ตอบจาก CONTEXT เท่านั้น):
+1. ห้ามใช้ความรู้ทั่วไปหรือข้อมูลภายนอก CONTEXT เด็ดขาด
+2. ถามว่า "มีไหม / มีหรือเปล่า" → ขึ้นต้นด้วย "มีครับ" หรือ "ไม่มีครับ" แล้วอธิบายจาก CONTEXT
+3. ถามว่า "ได้ไหม / ทำได้ไหม" → ขึ้นต้นด้วย "ได้ครับ" หรือ "ไม่ได้ครับ" แล้วอธิบายจาก CONTEXT
+4. ถามว่า "ใช่ไหม / จริงไหม" → ขึ้นต้นด้วย "ใช่ครับ" หรือ "ไม่ใช่ครับ"
+5. อย่าใช้ประโยค "ไม่พบข้อมูลในฐานความรู้"
+6. ถ้าคำถามอ้างอิงบทสนทนาก่อนหน้า ให้ใช้ประวัติด้านบนประกอบการตอบ
+7. ถ้าคำถามกว้าง ให้ถามกลับ 1 คำถาม
+8. ถ้ามีขั้นตอน ให้เรียงเป็นข้อ ตอบสั้น กระชับ ภาษาสุภาพ เป็นกันเอง
 
 CONTEXT (ใช้ได้เฉพาะข้อมูลจากส่วนนี้เท่านั้น):
 {context}
 
-QUESTION: {question}
-
-[ตรวจสอบก่อนตอบ: CONTEXT มีข้อมูลที่ตอบคำถามนี้ได้ไหม? ถ้าไม่มี → ตอบว่า "ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ"]"""
+QUESTION: {question}"""
 
         # Build message list: system → history turns → current question
         messages: list[dict] = [{"role": "system", "content": system_msg}]

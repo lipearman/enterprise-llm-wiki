@@ -47,7 +47,15 @@ class OllamaClient:
                 "num_ctx": settings.OLLAMA_NUM_CTX,
             },
         }
-        async with httpx.AsyncClient(timeout=settings.OLLAMA_TIMEOUT) as client:
+        # For streaming: connect/write have a hard limit but read=None so slow
+        # cloud token generation never cuts the stream mid-response.
+        stream_timeout = httpx.Timeout(
+            connect=30.0,
+            read=None,   # no read timeout — wait as long as needed per token
+            write=30.0,
+            pool=30.0,
+        )
+        async with httpx.AsyncClient(timeout=stream_timeout) as client:
             async with client.stream(
                 "POST",
                 f"{self.base_url}/api/chat",
@@ -69,16 +77,35 @@ class OllamaClient:
                         break
 
     async def embed(self, text: str, model: str | None = None) -> list[float]:
-        payload = {"model": model or settings.OLLAMA_EMBED_MODEL, "prompt": text}
+        """Get embedding vector.
+
+        Tries the newer /api/embed endpoint first (Ollama ≥ 0.1.26 and cloud),
+        falls back to the legacy /api/embeddings if 404 is returned.
+        """
+        mdl = model or settings.OLLAMA_EMBED_MODEL
         async with httpx.AsyncClient(timeout=settings.OLLAMA_TIMEOUT) as client:
-            r = await client.post(f"{self.base_url}/api/embeddings", json=payload, headers=self._headers())
+            # ── Try new endpoint first (/api/embed) ──────────────────────────
+            r = await client.post(
+                f"{self.base_url}/api/embed",
+                json={"model": mdl, "input": text},
+                headers=self._headers(),
+            )
+            if r.status_code == 404:
+                # ── Fall back to legacy endpoint (/api/embeddings) ───────────
+                r = await client.post(
+                    f"{self.base_url}/api/embeddings",
+                    json={"model": mdl, "prompt": text},
+                    headers=self._headers(),
+                )
             r.raise_for_status()
             data = r.json()
-            if "embedding" in data:
-                return data["embedding"]
+            # /api/embed  → {"embeddings": [[...]]}
             if "embeddings" in data and data["embeddings"]:
                 return data["embeddings"][0]
-            raise RuntimeError(f"Invalid embedding response: {data}")
+            # /api/embeddings → {"embedding": [...]}
+            if "embedding" in data:
+                return data["embedding"]
+            raise RuntimeError(f"No embedding in response: {data}")
 
 
 chat_llm = OllamaClient(settings.OLLAMA_BASE_URL, settings.OLLAMA_API_KEY)

@@ -8,6 +8,7 @@ Whitelisted in ApiKeyMiddleware via _PUBLIC_PREFIXES.
 """
 
 import json
+import logging
 import time
 
 from fastapi import APIRouter
@@ -16,6 +17,8 @@ from pydantic import BaseModel
 
 from app.db.supabase_client import supabase
 from app.services.chat_service import chat_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/public", tags=["public"])
 
@@ -109,8 +112,10 @@ async def public_chat_stream(req: PublicChatRequest):
             ):
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         except Exception as exc:
-            error = {"done": True, "error": str(exc), "sources": []}
-            yield f"data: {json.dumps(error)}\n\n"
+            logger.error("stream:top_level_error | %s: %s", type(exc).__name__, exc, exc_info=True)
+            err_token = {"token": f"ขออภัยครับ ระบบขัดข้องชั่วคราว ({type(exc).__name__}: {exc})"}
+            yield f"data: {json.dumps(err_token, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'done': True, 'sources': []})}\n\n"
 
     return StreamingResponse(
         event_generator(),

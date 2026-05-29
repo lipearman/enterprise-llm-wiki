@@ -4,7 +4,8 @@ import { useState, useEffect, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import {
   MessageCircleQuestion, CheckCircle2, Trash2, X, ChevronLeft,
-  ChevronRight, RefreshCw, Filter, Save, Clock,
+  ChevronRight, RefreshCw, Filter, Save, Clock, Zap, ExternalLink,
+  AlertCircle, BookOpen,
 } from "lucide-react";
 
 const DEFAULT_COMPANY = process.env.NEXT_PUBLIC_COMPANY_CODE || "DEVES";
@@ -26,6 +27,163 @@ interface UnansweredItem {
   is_resolved: boolean;
   resolved_at: string | null;
   note: string | null;
+}
+
+// ── Test RAG Modal ─────────────────────────────────────────────────────────────
+function TestModal({
+  item,
+  onClose,
+}: {
+  item: UnansweredItem;
+  onClose: () => void;
+}) {
+  const [answer,  setAnswer]  = useState<string | null>(null);
+  const [sources, setSources] = useState<{ title: string; url: string | null }[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState<string | null>(null);
+
+  useEffect(() => {
+    const fn = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", fn);
+    return () => window.removeEventListener("keydown", fn);
+  }, [onClose]);
+
+  // Auto-run RAG on open
+  useEffect(() => {
+    setLoading(true);
+    setAnswer(null);
+    setError(null);
+
+    apiFetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question:     item.question,
+        company_code: item.company_code,
+        force_rag:    true,   // skip answer-cache so we see real retrieval result
+      }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        setAnswer(data.answer ?? "(ไม่มีคำตอบ)");
+        const refs = data.source_refs ?? data.sources ?? [];
+        setSources(
+          refs
+            .map((r: { label?: string; title?: string; url?: string | null }) => ({
+              title: r.label ?? r.title ?? "แหล่งอ้างอิง",
+              url:   r.url ?? null,
+            }))
+            .filter((r: { title: string }) => r.title)
+        );
+      })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.id]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-2xl rounded-2xl bg-white dark:bg-slate-900 shadow-2xl flex flex-col overflow-hidden max-h-[80vh]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-violet-600 to-indigo-600 shrink-0">
+          <div className="flex items-center gap-2">
+            <Zap size={16} className="text-white" />
+            <span className="text-sm font-semibold text-white">ทดสอบ RAG</span>
+            <span className="text-xs text-white/60 ml-1">force_rag=true · {item.company_code}</span>
+          </div>
+          <button onClick={onClose} className="text-white/70 hover:text-white transition-colors">
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Body — scrollable */}
+        <div className="flex flex-col gap-4 px-5 py-4 overflow-y-auto">
+          {/* Original question */}
+          <div>
+            <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5 flex items-center gap-1.5">
+              <MessageCircleQuestion size={12} /> คำถามเดิม
+            </p>
+            <p className="text-sm text-slate-800 dark:text-slate-200 bg-slate-50 dark:bg-slate-800 rounded-xl px-3 py-2 border border-slate-200 dark:border-slate-700">
+              {item.question}
+            </p>
+          </div>
+
+          {/* RAG answer */}
+          <div>
+            <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5 flex items-center gap-1.5">
+              <BookOpen size={12} /> คำตอบจาก RAG
+            </p>
+
+            {loading && (
+              <div className="flex items-center gap-2 text-sm text-slate-400 bg-slate-50 dark:bg-slate-800 rounded-xl px-4 py-6 border border-slate-200 dark:border-slate-700">
+                <span className="inline-block w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+                กำลังรัน RAG…
+              </div>
+            )}
+
+            {error && (
+              <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/40 rounded-xl px-4 py-3 border border-red-200 dark:border-red-800">
+                <AlertCircle size={15} className="mt-0.5 shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
+
+            {!loading && !error && answer !== null && (
+              <div className="text-sm text-slate-800 dark:text-slate-200 bg-slate-50 dark:bg-slate-800 rounded-xl px-4 py-3 border border-slate-200 dark:border-slate-700 whitespace-pre-wrap leading-relaxed">
+                {answer}
+              </div>
+            )}
+          </div>
+
+          {/* Sources */}
+          {sources.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5 flex items-center gap-1.5">
+                <ExternalLink size={12} /> แหล่งข้อมูลที่ใช้
+              </p>
+              <ul className="space-y-1">
+                {sources.map((s, i) => (
+                  <li key={i}>
+                    {s.url ? (
+                      <a
+                        href={s.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+                      >
+                        <ExternalLink size={11} />
+                        {s.title}
+                      </a>
+                    ) : (
+                      <span className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                        <BookOpen size={11} /> {s.title}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex justify-end px-5 py-3 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 shrink-0">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 rounded-xl text-sm text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+          >
+            ปิด
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ── Resolve Modal ──────────────────────────────────────────────────────────────
@@ -114,6 +272,7 @@ export default function UnansweredPage() {
   const [company,    setCompany]    = useState(DEFAULT_COMPANY);
   const [resolving,  setResolving]  = useState<UnansweredItem | null>(null);
   const [saving,     setSaving]     = useState(false);
+  const [testing,    setTesting]    = useState<UnansweredItem | null>(null);
 
   const fetchItems = useCallback(async () => {
     setLoading(true);
@@ -295,6 +454,14 @@ export default function UnansweredPage() {
                   {/* Actions */}
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1">
+                      {/* Test RAG */}
+                      <button
+                        onClick={() => setTesting(item)}
+                        className="p-1.5 rounded-lg text-slate-400 hover:text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors"
+                        title="ทดสอบ RAG"
+                      >
+                        <Zap size={15} />
+                      </button>
                       {!item.is_resolved && (
                         <button
                           onClick={() => setResolving(item)}
@@ -341,6 +508,14 @@ export default function UnansweredPage() {
             </button>
           </div>
         </div>
+      )}
+
+      {/* ── Test RAG Modal ── */}
+      {testing && (
+        <TestModal
+          item={testing}
+          onClose={() => setTesting(null)}
+        />
       )}
 
       {/* ── Resolve Modal ── */}
