@@ -1,0 +1,62 @@
+services:
+
+  # ── Backend API ──────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    # NOTE: no --reload in production; CMD in Dockerfile is already correct.
+    # Override only when you need a different port or want hot-reload locally:
+    #   command: uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+    healthcheck:
+      # curl is installed in the Dockerfile
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Frontend UI ──────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8080
+      NEXT_PUBLIC_COMPANY_CODE: DEVES
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Background Job Worker ────────────────────────────────────────────────────
+  worker:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    # Inline Python daemon: poll job_runs every 10 s
+    command: >
+      python -u -c "
+      import asyncio
+      from app.jobs.runner import run_pending_jobs_once
+      from app.core.logging import logger
+      async def loop():
+          logger.info('Worker started — polling every 10 s')
+          while True:
+              try:
+                  await run_pending_jobs_once(5)
+              except Exception as e:
+                  logger.error(f'Worker poll error: {e}')
+              await asyncio.sleep(10)
+      asyncio.run(loop())
+      "
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

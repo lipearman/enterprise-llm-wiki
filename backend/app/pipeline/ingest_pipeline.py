@@ -1,5 +1,5 @@
 from app.core.config import settings
-from app.core.text import sha256_text
+from app.core.text import sha256_text, clean_text
 from app.core.logging import logger
 from app.db.supabase_client import supabase
 from app.services.crawler_service import crawler_service
@@ -21,6 +21,7 @@ class IngestPipeline:
     ) -> dict:
         company_code = company_code or settings.DEFAULT_COMPANY_CODE
         doc = await crawler_service.fetch_url(url, backend=crawler_backend)
+        doc["content_markdown"] = clean_text(doc.get("content_markdown") or "")
         source = self._upsert_source(company_code, "url", url, doc["title"])
 
         # Change detection: skip heavy processing if content unchanged
@@ -45,6 +46,7 @@ class IngestPipeline:
         from app.services.file_loader_service import file_loader_service
         company_code = company_code or settings.DEFAULT_COMPANY_CODE
         doc = file_loader_service.load_file(file_path)
+        doc["content_markdown"] = clean_text(doc.get("content_markdown") or "")
         fake_url = f"file://{file_path}"
         source = self._upsert_source(company_code, "file", fake_url, doc["title"])
 
@@ -140,6 +142,10 @@ class IngestPipeline:
         # Delete old chunks for this page first
         supabase.table("document_chunks").delete().eq("company_code", company_code).eq("source_url", url).execute()
 
+        # Enrich generic titles (e.g. "Deves") with URL-path info so chunk
+        # titles are meaningful in source references ("Deves (About Us - Company Profile)")
+        enriched_title = self._enrich_title(title, [url])
+
         chunks = chunking_service.split(content)
         saved = []
         for idx, chunk in enumerate(chunks):
@@ -148,7 +154,7 @@ class IngestPipeline:
                 "company_code": company_code,
                 "source_page_id": source_page_id,
                 "source_url": url,
-                "title": title,
+                "title": enriched_title,
                 "chunk_index": idx,
                 "content": chunk,
                 "embedding": emb,

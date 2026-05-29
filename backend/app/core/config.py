@@ -30,9 +30,16 @@ class Settings(BaseSettings):
     OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
     EMBEDDING_DIM: int = 768
 
+    # =========================================
+    # LOCAL LLM SERVER (for canonical QA, extraction, etc.)
+    # =========================================
+    LOCAL_LLM_BASE_URL: str = "http://llm-server:11434"
+    CANONICAL_QA_MODEL: str = "qwen2.5:7b-instruct"
+    CANONICAL_QA_MAX_CANDIDATES: int = 40   # max Q&As passed to LLM per request
+
     DEFAULT_COMPANY_CODE: str = "LOCKTON"
     RETRIEVAL_TOP_K: int = 20
-    RERANK_TOP_K: int = 5
+    RERANK_TOP_K: int = 8    # raised from 5 → 8 so contact-page results survive reranking
     CANONICAL_THRESHOLD: float = 0.90
     ANSWER_CACHE_THRESHOLD: float = 0.96
     SIMILARITY_THRESHOLD: float = 0.35
@@ -56,6 +63,12 @@ class Settings(BaseSettings):
     # CRAWLER
     # =========================================
     CRAWLER_BACKEND: str = "trafilatura"   # trafilatura | playwright | crawl4ai
+
+    # =========================================
+    # AUTH
+    # =========================================
+    API_KEY: str = ""                   # empty = auth disabled
+    API_KEY_ENABLED: bool = True        # set False to bypass auth entirely
 
     ENABLE_SCHEDULER: bool = True
     DAILY_CRAWL_CRON_HOUR: int = 2

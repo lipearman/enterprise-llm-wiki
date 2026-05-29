@@ -1,0 +1,82 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    // ── Backend ──────────────────────────────────────────────────────────────
+    {
+      "label": "Backend: uvicorn --reload",
+      "type": "shell",
+      "command": ".venv\\Scripts\\uvicorn.exe app.main:app --reload --port 8080 --host 0.0.0.0",
+      "options": {
+        "cwd": "${workspaceFolder}\\backend"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "uvicorn",
+        "pattern": { "regexp": "^ERROR" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Uvicorn running on",
+          "endsPattern": "Application startup complete"
+        }
+      },
+      "presentation": {
+        "label": "Backend",
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "dev"
+      }
+    },
+
+    // ── Frontend ─────────────────────────────────────────────────────────────
+    {
+      "label": "Frontend: npm run dev",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}\\frontend"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "next",
+        "pattern": { "regexp": "^error" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Next\\.js",
+          "endsPattern": "Ready in|started server"
+        }
+      },
+      "presentation": {
+        "label": "Frontend",
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "dev"
+      }
+    },
+
+    // ── Start All ─────────────────────────────────────────────────────────────
+    {
+      "label": "Dev: Start All",
+      "dependsOn": [
+        "Backend: uvicorn --reload",
+        "Frontend: npm run dev"
+      ],
+      "dependsOrder": "parallel",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "silent"
+      }
+    },
+
+    // ── Preview (Claude preview) ──────────────────────────────────────────────
+    {
+      "label": "Preview: open http://localhost:3000",
+      "type": "shell",
+      "command": "Start-Process 'http://localhost:3000'",
+      "options": { "shell": { "executable": "powershell.exe" } },
+      "presentation": { "reveal": "never" }
+    }
+  ]
+}

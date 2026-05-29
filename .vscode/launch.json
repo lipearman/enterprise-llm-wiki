@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Backend: Attach (debugpy)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5678 },
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}/backend",
+          "remoteRoot": "${workspaceFolder}/backend"
+        }
+      ],
+      "justMyCode": true
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Dev: Start Backend + Frontend",
+      "configurations": [],
+      "preLaunchTask": "Dev: Start All",
+      "stopAll": true
+    }
+  ]
+}

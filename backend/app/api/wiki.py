@@ -1,9 +1,66 @@
+import io
+import re
+import zipfile
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from app.db.supabase_client import supabase
 from app.core.config import settings
 
 router = APIRouter(prefix="/api/wiki", tags=["wiki"])
+
+
+# ─────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────
+
+def _safe_filename(slug: str) -> str:
+    """Sanitize a slug into a safe cross-platform filename (no path separators, etc.)."""
+    name = re.sub(r"[^\w\-]", "_", slug or "untitled")
+    name = re.sub(r"_+", "_", name).strip("_")
+    return (name[:120] or "untitled") + ".md"
+
+
+def _build_md(page: dict) -> str:
+    """Return full Markdown content with YAML frontmatter for a wiki page."""
+    # --- YAML frontmatter ---
+    lines = ["---"]
+    lines.append(f"title: {page.get('title', '')!r}")
+    lines.append(f"slug: {page.get('slug', '')}")
+    lines.append(f"status: {page.get('status', 'draft')}")
+    lines.append(f"version: {page.get('version', 1)}")
+
+    sources = page.get("source_urls") or []
+    if sources:
+        lines.append("source_urls:")
+        for url in sources:
+            lines.append(f"  - {url}")
+
+    created = page.get("created_at", "")
+    updated = page.get("updated_at", "")
+    if created:
+        lines.append(f"created_at: {created}")
+    if updated:
+        lines.append(f"updated_at: {updated}")
+    lines.append("---")
+    lines.append("")
+
+    # --- Summary ---
+    summary = (page.get("summary") or "").strip()
+    if summary:
+        lines.append(f"> {summary}")
+        lines.append("")
+
+    # --- Body ---
+    body = (page.get("content_markdown") or "").strip()
+    if body:
+        lines.append(body)
+    else:
+        lines.append("*(no content)*")
+
+    return "\n".join(lines) + "\n"
 
 
 # ─────────────────────────────────────────────
@@ -49,6 +106,77 @@ def delete_page(page_id: str):
         raise HTTPException(status_code=404, detail="Wiki page not found")
     supabase.table("wiki_pages").delete().eq("id", page_id).execute()
     return {"ok": True, "message": "Wiki page deleted"}
+
+
+@router.get("/export")
+def export_pages(company_code: str | None = None, status: str | None = None):
+    """
+    Export all wiki pages for a company as Markdown files packed in a ZIP archive.
+
+    Each page becomes ``<slug>.md`` with YAML frontmatter.
+    An ``_index.md`` summary table is included at the root of the archive.
+    """
+    company_code = company_code or settings.DEFAULT_COMPANY_CODE
+
+    query = supabase.table("wiki_pages").select(
+        "id,company_code,title,slug,summary,status,version,source_urls,"
+        "content_markdown,created_at,updated_at"
+    ).eq("company_code", company_code)
+    if status:
+        query = query.eq("status", status)
+    res = query.order("title").execute()
+    pages: list[dict] = res.data or []
+
+    # ── Build ZIP in memory ───────────────────────────────────────────
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+
+        # _index.md — summary table
+        index_lines = [
+            f"# Wiki Export — {company_code}",
+            "",
+            f"Exported **{len(pages)}** page(s) on "
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+            "",
+            "| Title | Slug | Status | Version | Updated |",
+            "|-------|------|--------|---------|---------|",
+        ]
+        for p in pages:
+            updated = (p.get("updated_at") or "")[:10]
+            index_lines.append(
+                f"| {p.get('title','')} "
+                f"| {p.get('slug','')} "
+                f"| {p.get('status','')} "
+                f"| {p.get('version', 1)} "
+                f"| {updated} |"
+            )
+        index_lines.append("")
+        zf.writestr("_index.md", "\n".join(index_lines))
+
+        # One .md per page
+        seen: dict[str, int] = {}
+        for page in pages:
+            base = _safe_filename(page.get("slug") or page.get("id", "untitled"))
+            # Deduplicate filenames (same slug but different id — rare, but safe)
+            if base in seen:
+                seen[base] += 1
+                stem, ext = base.rsplit(".", 1)
+                fname = f"{stem}_{seen[base]}.{ext}"
+            else:
+                seen[base] = 0
+                fname = base
+
+            zf.writestr(fname, _build_md(page))
+
+    buf.seek(0)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"wiki_{company_code}_{timestamp}.zip"
+
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ─────────────────────────────────────────────

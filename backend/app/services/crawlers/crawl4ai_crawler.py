@@ -1,4 +1,5 @@
-from .base import BaseCrawler
+import asyncio
+from .base import BaseCrawler, CrawlerError
 
 
 class Crawl4aiCrawler(BaseCrawler):
@@ -13,31 +14,52 @@ class Crawl4aiCrawler(BaseCrawler):
     Install:
         pip install crawl4ai
         crawl4ai-setup          # downloads Chromium + models
-        # or manually: playwright install chromium
+        # or manually: patchright install chromium
     """
 
     async def fetch_url(self, url: str) -> dict:
         try:
             from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
         except ImportError:
-            raise RuntimeError(
-                "crawl4ai is not installed. Run: pip install crawl4ai && crawl4ai-setup"
+            raise CrawlerError(
+                "crawl4ai is not installed. Run: pip install crawl4ai && patchright install chromium",
+                retryable=False,
             )
 
-        browser_cfg = BrowserConfig(headless=True, verbose=False)
-        run_cfg = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS,
-            wait_until="networkidle",
-            page_timeout=60_000,
-        )
+        try:
+            browser_cfg = BrowserConfig(headless=True, verbose=False)
+            run_cfg = CrawlerRunConfig(
+                cache_mode=CacheMode.BYPASS,
+                wait_until="networkidle",
+                page_timeout=60_000,
+            )
 
-        async with AsyncWebCrawler(config=browser_cfg) as crawler:
-            result = await crawler.arun(url=url, config=run_cfg)
+            async with AsyncWebCrawler(config=browser_cfg) as crawler:
+                result = await crawler.arun(url=url, config=run_cfg)
 
-        # Extract markdown — handle different crawl4ai API versions
+        except asyncio.TimeoutError as exc:
+            raise CrawlerError(f"crawl4ai timeout for {url}", retryable=True) from exc
+
+        except CrawlerError:
+            raise
+
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            retryable = any(kw in err_msg for kw in ("timeout", "connection", "network", "socket", "reset"))
+            raise CrawlerError(
+                f"crawl4ai error for {url}: {exc}",
+                retryable=retryable,
+            ) from exc
+
+        # Validate result
+        if result is None or not getattr(result, "success", True) is not False:
+            # crawl4ai sets result.success = False on hard failures
+            success = getattr(result, "success", True)
+            if success is False:
+                err = getattr(result, "error_message", "unknown crawl4ai error")
+                raise CrawlerError(f"crawl4ai reported failure for {url}: {err}", retryable=True)
+
         content = self._extract_markdown(result)
-
-        # Extract title
         title = self._extract_title(result) or url
 
         return {

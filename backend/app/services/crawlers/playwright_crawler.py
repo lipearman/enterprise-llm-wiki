@@ -1,6 +1,7 @@
+import asyncio
 import trafilatura
 from bs4 import BeautifulSoup
-from .base import BaseCrawler
+from .base import BaseCrawler, CrawlerError
 
 
 class PlaywrightCrawler(BaseCrawler):
@@ -18,29 +19,61 @@ class PlaywrightCrawler(BaseCrawler):
 
     async def fetch_url(self, url: str) -> dict:
         try:
-            from playwright.async_api import async_playwright
+            from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
         except ImportError:
-            raise RuntimeError(
-                "Playwright is not installed. Run: pip install playwright && playwright install chromium"
+            raise CrawlerError(
+                "Playwright is not installed. Run: pip install playwright && playwright install chromium",
+                retryable=False,
             )
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (compatible; LLM-Wiki-Bot/1.0)",
-                viewport={"width": 1280, "height": 800},
-            )
-            page = await context.new_page()
+        browser = None
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (compatible; LLM-Wiki-Bot/1.0)",
+                    viewport={"width": 1280, "height": 800},
+                )
+                page = await context.new_page()
 
-            try:
-                await page.goto(url, wait_until="networkidle", timeout=60_000)
-            except Exception:
-                # fallback: accept even if networkidle times out
-                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                try:
+                    await page.goto(url, wait_until="networkidle", timeout=60_000)
+                except PlaywrightTimeout:
+                    # Fallback: accept page even if network is still busy
+                    try:
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                    except PlaywrightTimeout as exc:
+                        raise CrawlerError(
+                            f"Playwright timeout loading {url}",
+                            retryable=True,
+                        ) from exc
 
-            html = await page.content()
-            title = (await page.title()) or ""
-            await browser.close()
+                html = await page.content()
+                title = (await page.title()) or ""
+                await browser.close()
+                browser = None
+
+        except CrawlerError:
+            raise
+
+        except asyncio.TimeoutError as exc:
+            raise CrawlerError(f"Asyncio timeout for {url}", retryable=True) from exc
+
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            # Connection refused, DNS failure → retryable
+            retryable = any(kw in err_msg for kw in ("net::", "connection", "timeout", "socket"))
+            raise CrawlerError(
+                f"Playwright error for {url}: {exc}",
+                retryable=retryable,
+            ) from exc
+
+        finally:
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
 
         # Extract clean markdown from fully-rendered HTML
         text = trafilatura.extract(

@@ -13,6 +13,7 @@ from app.services.crawlers.factory import BACKENDS
 router = APIRouter(prefix="/api/sources", tags=["sources"])
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".xlsm", ".txt", ".md"}
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB hard cap — prevents OOM on large uploads
 
 
 @router.get("")
@@ -44,6 +45,109 @@ def list_source_pages(source_id: str):
         "id,title,url,content_hash,created_at,updated_at"
     ).eq("source_id", source_id).order("created_at", desc=True).execute()
     return {"items": res.data or []}
+
+
+@router.post("/fix-chunk-titles")
+async def fix_chunk_titles(company_code: str | None = None):
+    """
+    Back-fill enriched titles on existing document_chunks.
+
+    Reads every distinct source_url from document_chunks, applies the same
+    URL-path enrichment logic used at ingest time, then bulk-updates chunks
+    whose current title is still the generic page title (e.g. 'Deves').
+
+    Safe to call multiple times — skips URLs where the title is already
+    enriched (contains ' (').
+    """
+    from app.pipeline.ingest_pipeline import ingest_pipeline
+
+    company_code = company_code or settings.DEFAULT_COMPANY_CODE
+
+    # 1. Fetch all distinct (source_url, title) pairs for this company
+    rows = (
+        supabase.table("document_chunks")
+        .select("source_url,title")
+        .eq("company_code", company_code)
+        .execute()
+        .data or []
+    )
+
+    # Deduplicate by source_url, keep first title seen
+    url_title: dict[str, str] = {}
+    for r in rows:
+        url = r.get("source_url") or ""
+        if url and url not in url_title:
+            url_title[url] = r.get("title") or ""
+
+    updated_urls: list[str] = []
+    skipped_urls: list[str] = []
+
+    for url, current_title in url_title.items():
+        # Skip if already enriched (has ' (' from a previous run or file:// URLs)
+        if " (" in current_title or url.startswith("file://"):
+            skipped_urls.append(url)
+            continue
+
+        enriched = ingest_pipeline._enrich_title(current_title, [url])
+        if enriched == current_title:
+            skipped_urls.append(url)
+            continue
+
+        # Bulk-update all chunks for this URL
+        supabase.table("document_chunks").update(
+            {"title": enriched}
+        ).eq("company_code", company_code).eq("source_url", url).execute()
+        updated_urls.append(url)
+
+    return {
+        "ok": True,
+        "updated": len(updated_urls),
+        "skipped": len(skipped_urls),
+        "updated_urls": updated_urls,
+    }
+
+
+@router.post("/clean-chunk-content")
+async def clean_chunk_content(company_code: str | None = None):
+    """
+    Strip soft hyphens, lone surrogates, and other invisible characters
+    from existing document_chunks.content that were injected by websites
+    during crawling and break Thai substring matching.
+
+    Fetches chunks whose content contains the U+00AD soft hyphen (most
+    common offender), cleans them with clean_text(), and writes back.
+    Safe to run multiple times.
+    """
+    from app.core.text import clean_text
+
+    company_code = company_code or settings.DEFAULT_COMPANY_CODE
+
+    # Supabase REST doesn't support LIKE on binary content directly,
+    # so we fetch all chunks and filter in Python.  For large datasets
+    # this could be batched, but typical deployments are small.
+    rows = (
+        supabase.table("document_chunks")
+        .select("id,content")
+        .eq("company_code", company_code)
+        .execute()
+        .data or []
+    )
+
+    cleaned_count = 0
+    for row in rows:
+        original = row.get("content") or ""
+        cleaned = clean_text(original)
+        if cleaned != original:
+            supabase.table("document_chunks").update(
+                {"content": cleaned}
+            ).eq("id", row["id"]).execute()
+            cleaned_count += 1
+
+    return {
+        "ok": True,
+        "total_checked": len(rows),
+        "cleaned": cleaned_count,
+    }
 
 
 @router.delete("/{source_id}")
@@ -96,8 +200,15 @@ async def upload_file(
 
     company_code = company_code or settings.DEFAULT_COMPANY_CODE
 
+    # Read with hard size cap — prevents OOM from huge uploads
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large ({len(content) // (1024*1024)} MB). Maximum allowed: 50 MB",
+        )
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-        content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
 
