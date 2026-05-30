@@ -1,9 +1,24 @@
 from functools import lru_cache
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Tuple, Type
+from pydantic_settings import (
+    BaseSettings, SettingsConfigDict, PydanticBaseSettingsSource,
+    DotEnvSettingsSource, EnvSettingsSource,
+)
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls: Type[BaseSettings], **kwargs) -> Tuple[PydanticBaseSettingsSource, ...]:
+        # .env file takes precedence over container environment variables
+        # so that updating .env is enough to change feature flags without
+        # recreating the container.
+        init    = kwargs.get("init_settings")
+        dotenv  = kwargs.get("dotenv_settings")
+        env     = kwargs.get("env_settings")
+        secrets = kwargs.get("file_secret_settings") or kwargs.get("secrets_settings")
+        return tuple(s for s in [init, dotenv, env, secrets] if s is not None)
 
     APP_NAME: str = "Enterprise LLM Wiki"
     APP_ENV: str = "development"
@@ -53,7 +68,7 @@ class Settings(BaseSettings):
     ENABLE_ANSWER_CACHE: bool = True
     ENABLE_WIKI_SEARCH: bool = True
     ENABLE_CHUNK_SEARCH: bool = True
-    ENABLE_RERANKER: bool = False
+    ENABLE_RERANKER: bool = True
     ENABLE_QUERY_REWRITE: bool = False
     ENABLE_GROUNDING: bool = True
     ENABLE_RELATIONSHIP_SEARCH: bool = False

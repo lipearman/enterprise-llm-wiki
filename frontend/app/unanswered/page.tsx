@@ -1,11 +1,11 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, API_BASE } from "@/lib/api";
 import {
   MessageCircleQuestion, CheckCircle2, Trash2, X, ChevronLeft,
   ChevronRight, RefreshCw, Filter, Save, Clock, Zap, ExternalLink,
-  AlertCircle, BookOpen,
+  AlertCircle, BookOpen, Database, MessageSquare,
 } from "lucide-react";
 
 const DEFAULT_COMPANY = process.env.NEXT_PUBLIC_COMPANY_CODE || "DEVES";
@@ -29,7 +29,9 @@ interface UnansweredItem {
   note: string | null;
 }
 
-// ── Test RAG Modal ─────────────────────────────────────────────────────────────
+// ── Test Modal ─────────────────────────────────────────────────────────────────
+type TestMode = "rag" | "chat";
+
 function TestModal({
   item,
   onClose,
@@ -37,10 +39,16 @@ function TestModal({
   item: UnansweredItem;
   onClose: () => void;
 }) {
-  const [answer,  setAnswer]  = useState<string | null>(null);
-  const [sources, setSources] = useState<{ title: string; url: string | null }[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState<string | null>(null);
+  const [mode,      setMode]      = useState<TestMode>("rag");
+  const [runKey,    setRunKey]    = useState(0);   // increment to re-run same mode
+  const [answer,    setAnswer]    = useState<string | null>(null);
+  const [sources,   setSources]   = useState<{ title: string; url: string | null }[]>([]);
+  const [loading,   setLoading]   = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [error,     setError]     = useState<string | null>(null);
+
+  // Always-callable: sets mode AND bumps runKey so same-mode clicks re-run
+  const runTest = (m: TestMode) => { setMode(m); setRunKey((k) => k + 1); };
 
   useEffect(() => {
     const fn = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -48,38 +56,138 @@ function TestModal({
     return () => window.removeEventListener("keydown", fn);
   }, [onClose]);
 
-  // Auto-run RAG on open
+  // Re-run whenever item, mode, or runKey changes
   useEffect(() => {
-    setLoading(true);
     setAnswer(null);
+    setSources([]);
     setError(null);
+    setLoading(true);
+    setStreaming(false);
 
-    apiFetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question:     item.question,
-        company_code: item.company_code,
-        force_rag:    true,   // skip answer-cache so we see real retrieval result
-      }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        setAnswer(data.answer ?? "(ไม่มีคำตอบ)");
-        const refs = data.source_refs ?? data.sources ?? [];
-        setSources(
-          refs
-            .map((r: { label?: string; title?: string; url?: string | null }) => ({
-              title: r.label ?? r.title ?? "แหล่งอ้างอิง",
-              url:   r.url ?? null,
-            }))
-            .filter((r: { title: string }) => r.title)
-        );
+    const ctrl = new AbortController();
+
+    if (mode === "rag") {
+      // ── RAG mode: authenticated, force_rag=true, non-streaming ──────────────
+      apiFetch("/api/chat", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        signal:  ctrl.signal,
+        body: JSON.stringify({
+          question:     item.question,
+          company_code: item.company_code,
+          force_rag:    true,
+        }),
       })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
+        .then((r) => r.json())
+        .then((data) => {
+          setAnswer(data.answer ?? "(ไม่มีคำตอบ)");
+          const refs = data.source_refs ?? data.sources ?? [];
+          setSources(
+            refs
+              .map((r: { label?: string; title?: string; url?: string | null }) => ({
+                title: r.label ?? r.title ?? "แหล่งอ้างอิง",
+                url:   r.url ?? null,
+              }))
+              .filter((r: { title: string }) => r.title)
+          );
+        })
+        .catch((e: Error) => { if (e.name !== "AbortError") setError(e.message); })
+        .finally(() => { if (!ctrl.signal.aborted) setLoading(false); });
+
+    } else {
+      // ── Chat mode: public streaming SSE — identical to FloatingChat ──────────
+      const sessionId = `test_${Math.random().toString(36).slice(2)}`;
+
+      (async () => {
+        try {
+          const res = await fetch(`${API_BASE}/api/public/chat/stream`, {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            signal:  ctrl.signal,
+            body: JSON.stringify({
+              message:      item.question,
+              company_code: item.company_code,
+              session_id:   sessionId,
+            }),
+          });
+
+          if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+          const reader  = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer        = "";
+          let accumulated   = "";
+          let hasFirstToken = false;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const parts = buffer.split("\n\n");
+            buffer = parts.pop() ?? "";
+
+            for (const part of parts) {
+              if (!part.startsWith("data: ")) continue;
+              let payload: {
+                token?: string;
+                done?: boolean;
+                sources?: { title?: string; label?: string; url?: string | null }[];
+                status?: string;
+              };
+              try { payload = JSON.parse(part.slice(6)); } catch { continue; }
+
+              if (payload.status === "thinking") continue;
+
+              if (payload.token !== undefined) {
+                // First token — switch from loading spinner to streaming text
+                if (!hasFirstToken) {
+                  hasFirstToken = true;
+                  setLoading(false);
+                  setStreaming(true);
+                }
+                accumulated += payload.token;
+                setAnswer(accumulated || null);
+              }
+              if (payload.done) {
+                // Edge case: done with no tokens (e.g. cache hit returns full answer)
+                if (!hasFirstToken) {
+                  setLoading(false);
+                  setStreaming(true);
+                }
+                setSources(
+                  (payload.sources ?? [])
+                    .map((r) => ({
+                      title: r.label ?? r.title ?? "แหล่งอ้างอิง",
+                      url:   r.url ?? null,
+                    }))
+                    .filter((r) => r.title)
+                );
+                setStreaming(false);
+              }
+            }
+          }
+        } catch (e: unknown) {
+          if ((e as Error).name !== "AbortError") {
+            setError((e as Error).message);
+          }
+        } finally {
+          // Safety net: always clear loading/streaming unless this run was
+          // cancelled mid-flight by a mode switch (AbortController fired).
+          if (!ctrl.signal.aborted) {
+            setLoading(false);
+            setStreaming(false);
+          }
+        }
+      })();
+    }
+
+    return () => ctrl.abort();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [item.id]);
+  }, [item.id, mode, runKey]);
+
+  const isRag  = mode === "rag";
+  const isChat = mode === "chat";
 
   return (
     <div
@@ -94,8 +202,8 @@ function TestModal({
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-violet-600 to-indigo-600 shrink-0">
           <div className="flex items-center gap-2">
             <Zap size={16} className="text-white" />
-            <span className="text-sm font-semibold text-white">ทดสอบ RAG</span>
-            <span className="text-xs text-white/60 ml-1">force_rag=true · {item.company_code}</span>
+            <span className="text-sm font-semibold text-white">ทดสอบบอท</span>
+            <span className="text-xs text-white/60 ml-1">{item.company_code}</span>
           </div>
           <button onClick={onClose} className="text-white/70 hover:text-white transition-colors">
             <X size={18} />
@@ -114,16 +222,58 @@ function TestModal({
             </p>
           </div>
 
-          {/* RAG answer */}
+          {/* Mode buttons */}
+          <div className="flex gap-2">
+            <button
+              onClick={() => runTest("rag")}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-xs font-semibold transition-all ${
+                isRag
+                  ? "bg-violet-600 border-violet-600 text-white shadow-sm shadow-violet-600/30"
+                  : "bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-violet-400 hover:text-violet-600 dark:hover:text-violet-400"
+              }`}
+            >
+              {isRag && loading ? (
+                <span className="inline-block w-3.5 h-3.5 border-2 border-white/60 border-t-white rounded-full animate-spin" />
+              ) : (
+                <Database size={13} />
+              )}
+              ทดสอบ RAG
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                isRag ? "bg-white/20 text-white" : "bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400"
+              }`}>force_rag=true</span>
+            </button>
+
+            <button
+              onClick={() => runTest("chat")}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-xs font-semibold transition-all ${
+                isChat
+                  ? "bg-indigo-600 border-indigo-600 text-white shadow-sm shadow-indigo-600/30"
+                  : "bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-indigo-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+              }`}
+            >
+              {isChat && (loading || streaming) ? (
+                <span className="inline-block w-3.5 h-3.5 border-2 border-white/60 border-t-white rounded-full animate-spin" />
+              ) : (
+                <MessageSquare size={13} />
+              )}
+              ทดสอบ Floating Chat
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                isChat ? "bg-white/20 text-white" : "bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400"
+              }`}>streaming</span>
+            </button>
+          </div>
+
+          {/* Answer */}
           <div>
             <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5 flex items-center gap-1.5">
-              <BookOpen size={12} /> คำตอบจาก RAG
+              <BookOpen size={12} />
+              {isRag ? "คำตอบจาก RAG" : "คำตอบจาก Floating Chat"}
             </p>
 
             {loading && (
               <div className="flex items-center gap-2 text-sm text-slate-400 bg-slate-50 dark:bg-slate-800 rounded-xl px-4 py-6 border border-slate-200 dark:border-slate-700">
                 <span className="inline-block w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
-                กำลังรัน RAG…
+                {isRag ? "กำลังรัน RAG…" : "กำลังรอข้อมูล…"}
               </div>
             )}
 
@@ -137,6 +287,9 @@ function TestModal({
             {!loading && !error && answer !== null && (
               <div className="text-sm text-slate-800 dark:text-slate-200 bg-slate-50 dark:bg-slate-800 rounded-xl px-4 py-3 border border-slate-200 dark:border-slate-700 whitespace-pre-wrap leading-relaxed">
                 {answer}
+                {streaming && (
+                  <span className="inline-block w-0.5 h-[1em] bg-indigo-400 align-middle ml-0.5 animate-pulse" />
+                )}
               </div>
             )}
           </div>

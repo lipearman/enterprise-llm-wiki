@@ -1,0 +1,45 @@
+# Node
+node_modules/
+.next/
+dist/
+build/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+crawler-env/
+
+# Logs
+logs/
+*.log
+
+# Large data
+*.zip
+*.xlsx
+*.csv
+*.jsonl
+
+# AI / Vector
+vector_cache/
+embeddings/
+chroma/
+faiss/
+
+# Git
+.git/
+
+# Binary
+*.exe
+*.dll
+
+# Generated
+coverage/
+tmp/
+temp/
+
+# Docker
+docker-data/
+
+# Supabase
+supabase/.temp/

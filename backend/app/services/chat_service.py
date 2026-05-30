@@ -8,6 +8,7 @@ from app.db.supabase_client import supabase
 from app.schemas.chat import ChatResponse, ChatSource, SourceRef
 from app.services.ollama_client import chat_llm, embed_llm, local_llm
 from app.services.retrieval_service import retrieval_service
+from app.services.bot_settings_service import bot_settings_service
 
 logger = logging.getLogger(__name__)
 
@@ -99,22 +100,123 @@ _NO_ANSWER_PHRASES = [
     "ไม่มีในฐานข้อมูล",
 ]
 
+# Phrases that indicate the bot asked a clarifying question.
+# These should NOT be saved as unanswered — the conversation is still in progress.
+_CLARIFY_PHRASES = [
+    "หมายถึงอะไรครับ",
+    "หมายถึงอะไรคะ",
+    "ต้องการข้อมูลส่วนไหน",
+    "ต้องการทราบข้อมูลส่วนไหน",
+    "กรุณาระบุเพิ่มเติม",
+    "ขอทราบเพิ่มเติม",
+]
+
+# ── Python-level ambiguity detection ─────────────────────────────────────────
+# Keywords that are genuinely ambiguous in an insurance-company context.
+# Each maps to a list of predefined sub-type choices shown to the user.
+_AMBIGUOUS_KEYWORDS: dict[str, list[str]] = {
+    "เบอร์":   ["เบอร์โทรศัพท์", "เบอร์กรมธรรม์", "เบอร์เคลม", "เบอร์มือถือ"],
+    "รหัส":   ["รหัสกรมธรรม์", "รหัสอ้างอิง", "รหัสสาขา"],
+    "ราคา":   ["ราคาเบี้ยประกัน", "ราคาซ่อม", "ราคาต่ออายุ"],
+    "ติดต่อ": ["ช่องทางโทรศัพท์", "ช่องทางอีเมล", "ที่อยู่สำนักงาน"],
+    "ที่อยู่": ["ที่อยู่สำนักงานใหญ่", "ที่อยู่สาขา"],
+    "เอกสาร": ["เอกสารการเคลม", "เอกสารต่อกรมธรรม์", "เอกสารใบแจ้งหนี้"],
+}
+
+# Specific question words that signal CLEAR intent — even if the question
+# also contains an ambiguous keyword, these take priority.
+_CLEAR_QUESTION_WORDS = [
+    "ที่ไหน", "อยู่ที่ไหน", "ได้ที่ไหน",
+    "อย่างไร", "ยังไง",
+    "คืออะไร", "หมายความว่าอะไร",
+    "ทำอะไร", "ทำได้ไหม", "ทำยังไง",
+    "เมื่อไหร่", "เท่าไหร่", "กี่บาท",
+    "คือใคร", "มีไหม", "ใช่ไหม",
+]
+
 
 class ChatService:
-    @staticmethod
-    def _is_no_answer(answer: str, context_rows: list[dict]) -> bool:
+
+    def _build_clarify_response(
+        self, question: str, context_rows: list[dict], company_code: str
+    ) -> str | None:
+        """Return a pre-built clarifying question when the question contains an
+        ambiguous keyword AND the question has no clear-intent word.
+
+        Called BEFORE the LLM so we never rely on the model to detect ambiguity.
+        Always uses PREDEFINED choices (from DB config), never LLM-generated ones,
+        so the choices are always the correct subtypes of the keyword — not random
+        context topics that the LLM might incorrectly associate.
+
+        NOTE: context_rows is intentionally ignored for the ambiguous-keyword check.
+        Even when context has data, we still ask the predefined clarifying question
+        so the user picks a specific subtype ("เบอร์โทรศัพท์") rather than the bot
+        offering unrelated context topics (e.g. "ที่อยู่สำนักงาน") as fake subtypes.
+
+        Returns None when:
+        - question contains a clear question word (ที่ไหน / คืออะไร / etc.)
+        - question uses a compound/specific term that removes ambiguity
+        - no ambiguous keyword found  →  let LLM answer from context
+        """
+        q = question.strip()
+
+        # Load per-company config (cached after first load)
+        clear_words  = bot_settings_service.get(company_code, "clear_question_words")
+        ambiguous_kw = bot_settings_service.get(company_code, "ambiguous_keywords")
+
+        # Clear question words → not ambiguous regardless of keywords
+        for clear_word in clear_words:
+            if clear_word in q:
+                return None
+
+        # Compound/specific terms override single-keyword ambiguity
+        # e.g. "เบอร์กรมธรรม์" is specific even though it contains "เบอร์"
+        compound_overrides = [
+            "เบอร์กรมธรรม์", "เบอร์ติดต่อ", "เบอร์โทรศัพท์",
+            "รหัสกรมธรรม์", "รหัสอ้างอิง",
+            "ราคาเบี้ย", "ที่อยู่สำนักงาน",
+        ]
+        for compound in compound_overrides:
+            if compound in q:
+                return None
+
+        # Match ambiguous keyword → ALWAYS return predefined choices
+        for keyword, choices in ambiguous_kw.items():
+            if keyword in q:
+                # If the user already specified one of the known sub-types
+                # (e.g. answered "ที่อยู่สาขา" after a clarification prompt),
+                # treat the question as specific enough → don't ask again.
+                if any(choice in q for choice in choices):
+                    return None
+                bullets = "\n".join(f"• {c}" for c in choices)
+                return (
+                    f'"{keyword}" หมายถึงอะไรครับ?\n'
+                    f'{bullets}\n'
+                    f'ต้องการข้อมูลส่วนไหนครับ?'
+                )
+
+        return None
+
+    def _is_no_answer(self, answer: str, context_rows: list[dict], company_code: str) -> bool:
         """Return True when the bot effectively couldn't answer the question.
 
         Two conditions trigger 'unanswered':
         1. Retrieval returned zero rows → no context at all, LLM had nothing to work with.
         2. LLM explicitly indicated it has no relevant information (sentinel phrases).
 
-        This catches cases where Rule 3 of the prompt ("มีไหม → ไม่มีครับ") makes
-        the LLM say "ไม่มีครับ" instead of the full sentinel phrase when context is empty.
+        Clarifying questions ("หมายถึงอะไรครับ?") are NOT counted as unanswered —
+        the conversation is ongoing and the user just needs to specify more detail.
+        Phrase lists are loaded from BotSettingsService (DB-backed, editable via UI).
         """
+        clarify_phrases  = bot_settings_service.get(company_code, "clarify_phrases")
+        no_answer_phrases = bot_settings_service.get(company_code, "no_answer_phrases")
+
+        # Clarifying question → still in progress, don't save as unanswered
+        if any(phrase in answer for phrase in clarify_phrases):
+            return False
         if not context_rows:
             return True
-        return any(phrase in answer for phrase in _NO_ANSWER_PHRASES)
+        return any(phrase in answer for phrase in no_answer_phrases)
 
     async def answer(
         self,
@@ -141,17 +243,32 @@ class ChatService:
                 sources=[],
             )
 
-        # ── Build context-aware retrieval query ───────────────────────────
-        # When a session has history and the user sends a short follow-up
-        # (e.g. just a company name after asking for info), the current
-        # question alone gives poor retrieval signal.  We rewrite it into a
-        # standalone query that incorporates the conversation context so
-        # that retrieval (both canonical QA and RAG) finds the right docs.
+        # ── Python-level ambiguity check (BEFORE cache/QA — always deterministic) ──
+        # Must run first so ambiguous keywords always trigger the predefined
+        # clarifying question and never get served a stale cached answer.
+        clarify = self._build_clarify_response(question, [], company_code)
+        if clarify:
+            logger.info("clarify_intercept | q=%r | kw_match=True", question[:60])
+            if session_id:
+                session_store.save(session_id, question, clarify)
+            return ChatResponse(
+                answer=clarify,
+                mode="rag",
+                cached=False,
+                source_refs=[],
+                sources=[],
+            )
+
+        # ── Build context-aware retrieval query (RAG only) ───────────────
+        # retrieval_q enriches short follow-ups (e.g. "LOCKTON" after
+        # "ขอที่อยู่") for the vector search step ONLY.
+        # Cache / canonical QA / the LLM prompt always use the original
+        # question so previous-turn content cannot contaminate the answer.
         retrieval_q = await self._build_retrieval_query(question, history)
 
-        # ── Answer cache ──────────────────────────────────────────────────
+        # ── Answer cache — use original question to avoid history bleed ───
         if not force_rag:
-            cached = await retrieval_service.match_answer_cache(retrieval_q, company_code)
+            cached = await retrieval_service.match_answer_cache(question, company_code)
             if cached:
                 if session_id:
                     session_store.save(session_id, question, cached["answer"])
@@ -162,8 +279,8 @@ class ChatService:
                     sources=[],
                 )
 
-            # ── Canonical Q&A ─────────────────────────────────────────────
-            qa = await retrieval_service.match_canonical_qa(retrieval_q, company_code)
+            # ── Canonical Q&A — use original question ─────────────────────
+            qa = await retrieval_service.match_canonical_qa(question, company_code)
             if qa:
                 score = qa.get("similarity", 0)
                 logger.info("canonical_qa_used | score=%.4f | answer=%r", score, qa.get("answer", "")[:80])
@@ -180,13 +297,14 @@ class ChatService:
                     )],
                 )
 
-        # ── RAG ───────────────────────────────────────────────────────────
+        # ── RAG — retrieval_q (enriched) for embedding, original for LLM ──
         context_rows = await retrieval_service.search_context(retrieval_q, company_code)
+
         context = self._build_context(context_rows)
-        # Pass retrieval_q (contextually enriched) to LLM so it knows the
-        # full intent even when the user's original message was very short.
+        # Use the original question in the LLM prompt so history from
+        # the previous turn does not distort what the model answers.
         try:
-            answer = await self._generate_answer(retrieval_q, context, history)
+            answer = await self._generate_answer(self._coerce_to_question(question), context, history)
         except Exception as exc:
             logger.error("llm_generate_error | %s: %s", type(exc).__name__, exc)
             return ChatResponse(
@@ -206,7 +324,7 @@ class ChatService:
             session_store.save(session_id, question, answer)
 
         # Don't show source refs when the LLM signals it found nothing useful
-        no_answer = self._is_no_answer(answer, context_rows)
+        no_answer = self._is_no_answer(answer, context_rows, company_code)
         source_refs = [] if no_answer else self._build_source_refs(context_rows)
 
         # Track unanswered questions (floating-chat only)
@@ -310,6 +428,43 @@ class ChatService:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _coerce_to_question(question: str) -> str:
+        """If the question is a bare noun-phrase (topic name without any verb or
+        question word), rewrite it so the LLM knows to summarise the topic.
+
+        Examples:
+          "ประกันรถยนต์"  → "ขอข้อมูลเกี่ยวกับประกันรถยนต์"
+          "เบอร์โทรศัพท์" → "ขอข้อมูลเกี่ยวกับเบอร์โทรศัพท์"
+          "ขอเบอร์หน่อย"  → unchanged  (has verb "ขอ")
+          "ซื้อประกันที่ไหน" → unchanged (has question word "ที่ไหน")
+        """
+        _QUESTION_WORDS = [
+            "ที่ไหน", "อยู่ที่ไหน", "ได้ที่ไหน", "อย่างไร", "ยังไง",
+            "คืออะไร", "หมายความว่า", "ทำอะไร", "ทำได้ไหม", "ทำยังไง",
+            "เมื่อไหร่", "เท่าไหร่", "กี่บาท", "คือใคร",
+            "มีไหม", "ใช่ไหม", "จริงไหม", "หรือเปล่า", "บ้าง",
+            # common question/sentence-final particles
+            "ไหม", "หน่อย", "นะ", "ด้วย", "เลย",
+        ]
+        _VERB_PREFIXES = [
+            "ขอ", "ต้องการ", "อยาก", "ช่วย", "บอก", "แจ้ง",
+            "ส่ง", "ดู", "เช็ค", "ทำ", "จอง", "สมัคร",
+            "ชำระ", "ต่อ", "ยกเลิก", "ซื้อ", "เปิด", "ปิด",
+        ]
+        q = question.strip()
+        # Has a question word anywhere → already a question
+        for w in _QUESTION_WORDS:
+            if w in q:
+                return question
+        # Starts with or contains a common Thai verb → already a request
+        for v in _VERB_PREFIXES:
+            if v in q:
+                return question
+        # Bare noun-phrase → append "มีอะไรบ้าง" so the LLM prompt's
+        # clear-question-word bypass ("บ้าง") kicks in, forcing a direct answer.
+        return f"{q}มีอะไรบ้าง"
+
     def _build_context(self, rows: list[dict]) -> str:
         blocks = []
         for i, r in enumerate(rows, 1):
@@ -406,14 +561,26 @@ class ChatService:
             return
 
         try:
+            # ── Python-level ambiguity check (BEFORE cache — always deterministic) ──
+            # Must run first so ambiguous keywords always trigger the predefined
+            # clarifying question and never get served a stale cached answer.
+            clarify = self._build_clarify_response(question, [], company_code)
+            if clarify:
+                logger.info("stream:clarify_intercept | q=%r", question[:60])
+                if session_id:
+                    session_store.save(session_id, question, clarify)
+                yield {"token": clarify}
+                yield {"done": True, "sources": []}
+                return
+
             # ── Heartbeat #1 — before query-rewrite LLM call (can be slow) ──
             yield {"status": "thinking"}
             retrieval_q = await self._build_retrieval_query(question, history)
 
-            # ── Answer cache ──────────────────────────────────────────────
+            # ── Answer cache — use original question to avoid history bleed ─
             if not force_rag:
                 yield {"status": "thinking"}
-                cached = await retrieval_service.match_answer_cache(retrieval_q, company_code)
+                cached = await retrieval_service.match_answer_cache(question, company_code)
                 if cached:
                     if session_id:
                         session_store.save(session_id, question, cached["answer"])
@@ -421,9 +588,9 @@ class ChatService:
                     yield {"done": True, "sources": []}
                     return
 
-                # ── Canonical Q&A (may call local LLM for matching) ──────
+                # ── Canonical Q&A — use original question ─────────────────
                 yield {"status": "thinking"}
-                qa = await retrieval_service.match_canonical_qa(retrieval_q, company_code)
+                qa = await retrieval_service.match_canonical_qa(question, company_code)
                 if qa:
                     if session_id:
                         session_store.save(session_id, question, qa["answer"])
@@ -431,13 +598,14 @@ class ChatService:
                     yield {"done": True, "sources": []}
                     return
 
-            # ── RAG retrieval (embedding + Supabase + text search) ────────
+            # ── RAG — retrieval_q (enriched) for embedding, original for LLM
             yield {"status": "thinking"}
             context_rows = await retrieval_service.search_context(retrieval_q, company_code)
+
             context = self._build_context(context_rows)
 
             full_answer = ""
-            async for token in self._generate_answer_stream(retrieval_q, context, history):
+            async for token in self._generate_answer_stream(self._coerce_to_question(question), context, history):
                 full_answer += token
                 yield {"token": token}
 
@@ -456,7 +624,7 @@ class ChatService:
         except Exception as exc:
             logger.warning("stream:cache_save_error | %s: %s", type(exc).__name__, exc)
 
-        no_answer = self._is_no_answer(full_answer, context_rows)
+        no_answer = self._is_no_answer(full_answer, context_rows, company_code)
         source_refs = [] if no_answer else self._build_source_refs(context_rows)
 
         # Track unanswered questions (floating-chat only)
@@ -474,39 +642,22 @@ class ChatService:
         context: str,
         history: list[dict],
     ):
-        """Build prompt and yield tokens from the LLM (async generator)."""
-        system_msg = (
-            "คุณเป็นผู้ช่วยข้อมูลของบริษัท ตอบได้เฉพาะจากข้อมูลใน CONTEXT ที่ให้มาเท่านั้น "
-            "ห้ามใช้ความรู้ทั่วไปหรือข้อมูลนอก CONTEXT เด็ดขาด "
-            "คุณจำบทสนทนาก่อนหน้าได้และสามารถอ้างอิงได้"
+        """Build prompt, call the LLM (non-streaming), and yield the full answer.
+
+        We deliberately use the non-streaming chat() call here even though this
+        is an async generator.  The cloud model (gpt-oss:20b-cloud) ignores the
+        CONTEXT when called with stream=True, consistently returning
+        "ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ" for valid RAG queries.  Using
+        stream=False (non-streaming) produces correct answers.  The SSE
+        connection is maintained by the heartbeat {"status": "thinking"} events
+        emitted by answer_stream(); the final answer arrives as one token.
+        """
+        logger.debug(
+            "stream:llm_call | q=%r | ctx_len=%d | hist_turns=%d",
+            question[:60], len(context), len(history),
         )
-        current_prompt = f"""[ขั้นตอนบังคับ — ทำตามลำดับนี้เท่านั้น]
-
-ขั้นที่ 1 (ตรวจสอบก่อนเสมอ): CONTEXT ด้านล่างมีข้อมูลที่เกี่ยวข้องกับคำถามนี้โดยตรงไหม?
-  → ถ้า **ไม่มี** → ตอบว่า "ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ" แล้วหยุด ห้ามต่อเติม ห้ามใช้ข้อ 1-8
-  → ถ้า **มี**    → ทำขั้นที่ 2 ต่อไป
-
-ขั้นที่ 2 (ตอบจาก CONTEXT เท่านั้น):
-1. ห้ามใช้ความรู้ทั่วไปหรือข้อมูลภายนอก CONTEXT เด็ดขาด
-2. ถามว่า "มีไหม / มีหรือเปล่า" → ขึ้นต้นด้วย "มีครับ" หรือ "ไม่มีครับ" แล้วอธิบายจาก CONTEXT
-3. ถามว่า "ได้ไหม / ทำได้ไหม" → ขึ้นต้นด้วย "ได้ครับ" หรือ "ไม่ได้ครับ" แล้วอธิบายจาก CONTEXT
-4. ถามว่า "ใช่ไหม / จริงไหม" → ขึ้นต้นด้วย "ใช่ครับ" หรือ "ไม่ใช่ครับ"
-5. อย่าใช้ประโยค "ไม่พบข้อมูลในฐานความรู้"
-6. ถ้าคำถามอ้างอิงบทสนทนาก่อนหน้า ให้ใช้ประวัติด้านบนประกอบการตอบ
-7. ถ้าคำถามกว้าง ให้ถามกลับ 1 คำถาม
-8. ถ้ามีขั้นตอน ให้เรียงเป็นข้อ ตอบสั้น กระชับ ภาษาสุภาพ เป็นกันเอง
-
-CONTEXT (ใช้ได้เฉพาะข้อมูลจากส่วนนี้เท่านั้น):
-{context}
-
-QUESTION: {question}"""
-
-        messages: list[dict] = [{"role": "system", "content": system_msg}]
-        messages.extend(history)
-        messages.append({"role": "user", "content": current_prompt})
-
-        async for token in chat_llm.chat_stream(messages, model=settings.OLLAMA_CHAT_MODEL):
-            yield token
+        answer = await self._generate_answer(question, context, history)
+        yield answer
 
     async def _generate_answer(
         self,
@@ -520,23 +671,28 @@ QUESTION: {question}"""
             "คุณจำบทสนทนาก่อนหน้าได้และสามารถอ้างอิงได้"
         )
 
-        current_prompt = f"""[ขั้นตอนบังคับ — ทำตามลำดับนี้เท่านั้น]
+        current_prompt = f"""[คำสั่งระบบ — ห้ามถามกลับ ตอบจาก CONTEXT เท่านั้น]
 
-ขั้นที่ 1 (ตรวจสอบก่อนเสมอ): CONTEXT ด้านล่างมีข้อมูลที่เกี่ยวข้องกับคำถามนี้โดยตรงไหม?
-  → ถ้า **ไม่มี** → ตอบว่า "ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ" แล้วหยุด ห้ามต่อเติม ห้ามใช้ข้อ 1-8
-  → ถ้า **มี**    → ทำขั้นที่ 2 ต่อไป
+ระบบได้ตรวจสอบความชัดเจนของคำถามก่อนส่งมาให้คุณแล้ว งานของคุณคือ **ตอบจาก CONTEXT เท่านั้น** ห้ามถามกลับผู้ใช้ไม่ว่ากรณีใด
 
-ขั้นที่ 2 (ตอบจาก CONTEXT เท่านั้น):
+━━━ กฎการตอบ ━━━
+  CONTEXT มีข้อมูลตรงกัน → ตอบตามกฎด้านล่าง
+  CONTEXT ไม่มีข้อมูล    → ตอบว่า "ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ" แล้วหยุด
+
 1. ห้ามใช้ความรู้ทั่วไปหรือข้อมูลภายนอก CONTEXT เด็ดขาด
-2. ถามว่า "มีไหม / มีหรือเปล่า" → ขึ้นต้นด้วย "มีครับ" หรือ "ไม่มีครับ" แล้วอธิบายจาก CONTEXT
-3. ถามว่า "ได้ไหม / ทำได้ไหม" → ขึ้นต้นด้วย "ได้ครับ" หรือ "ไม่ได้ครับ" แล้วอธิบายจาก CONTEXT
+2. ถามว่า "มีไหม / มีหรือเปล่า" → ขึ้นต้นด้วย "มีครับ" หรือ "ไม่มีครับ"
+3. ถามว่า "ได้ไหม / ทำได้ไหม" → ขึ้นต้นด้วย "ได้ครับ" หรือ "ไม่ได้ครับ"
 4. ถามว่า "ใช่ไหม / จริงไหม" → ขึ้นต้นด้วย "ใช่ครับ" หรือ "ไม่ใช่ครับ"
 5. อย่าใช้ประโยค "ไม่พบข้อมูลในฐานความรู้"
 6. ถ้าคำถามอ้างอิงบทสนทนาก่อนหน้า ให้ใช้ประวัติด้านบนประกอบการตอบ
-7. ถ้าคำถามกว้าง ให้ถามกลับ 1 คำถาม
-8. ถ้ามีขั้นตอน ให้เรียงเป็นข้อ ตอบสั้น กระชับ ภาษาสุภาพ เป็นกันเอง
+7. ถ้ามีขั้นตอน ให้เรียงเป็นข้อ ตอบสั้น กระชับ ภาษาสุภาพ เป็นกันเอง
+8. ถ้า QUESTION เป็นชื่อหัวข้อ/ประเภทสินค้าหรือระบุหัวข้อเฉพาะ (เช่น "ประกันรถยนต์" "ที่อยู่สาขา" "เบอร์กรมธรรม์") และ CONTEXT มีข้อมูล → สรุปข้อมูลสำคัญจาก CONTEXT เลย
+9. ห้ามถามผู้ใช้ว่า "หมายถึงอะไร" หรือ "ขอรายละเอียดเพิ่มเติม" — งานคือตอบจาก CONTEXT เท่านั้น
+10. ถ้าถามว่า "มีกี่..." หรือ "มีอะไรบ้าง" → ระบุเฉพาะรายการที่ปรากฏใน CONTEXT เท่านั้น ห้ามนับหรือสรุปจำนวนเองถ้า CONTEXT ไม่ได้ระบุตัวเลขไว้ชัดเจน
+11. ประโยคแรกต้องตอบตรงคำถามที่ถามเสมอ เช่น "บริษัทก่อตั้งปี 2490 ครับ" หรือ "ทุนจดทะเบียน 500 ล้านบาทครับ" จากนั้นจึงขยายรายละเอียด
+12. ตอบเฉพาะสิ่งที่คำถามถามเท่านั้น ห้ามเพิ่มหัวข้ออื่นที่ไม่เกี่ยวข้องกับคำถาม
 
-CONTEXT (ใช้ได้เฉพาะข้อมูลจากส่วนนี้เท่านั้น):
+CONTEXT:
 {context}
 
 QUESTION: {question}"""
@@ -574,6 +730,20 @@ QUESTION: {question}"""
     ) -> None:
         if not settings.ENABLE_ANSWER_CACHE:
             return
+
+        # Never cache "no answer" or clarifying-question responses.
+        # Caching them causes the bot to serve stale "ไม่มีข้อมูล" indefinitely
+        # even after relevant data is added to the knowledge base.
+        no_answer_phrases = bot_settings_service.get(company_code, "no_answer_phrases")
+        clarify_phrases   = bot_settings_service.get(company_code, "clarify_phrases")
+        skip_phrases = list(no_answer_phrases) + list(clarify_phrases)
+        if any(phrase in answer for phrase in skip_phrases):
+            logger.debug("answer_cache_skip | bad_answer phrase | q=%r", question[:60])
+            return
+        if not rows:
+            logger.debug("answer_cache_skip | no context rows | q=%r", question[:60])
+            return
+
         emb = await embed_llm.embed(normalize_question(question))
         source_refs = [
             {"type": r.get("source_type"), "id": r.get("id"), "title": r.get("title"), "url": r.get("source_url")}

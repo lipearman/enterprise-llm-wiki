@@ -11,13 +11,16 @@ import { Brain, Moon, Sun, LogOut, Menu, X } from "lucide-react";
 import FloatingChat from "@/components/FloatingChat";
 
 const NAV_ITEMS = [
-  { href: "/",            label: "💬 Chat",        exact: true  },
+  { href: "/chat",        label: "💬 Chat",        exact: true  },
   { href: "/wiki",        label: "📖 Wiki",         exact: false },
   { href: "/qa",          label: "❓ QA Editor",    exact: false },
   { href: "/sources",     label: "🔗 Sources",      exact: false },
   { href: "/jobs",        label: "⚙️ Jobs",         exact: false },
   { href: "/graph",       label: "🕸️ Graph",        exact: false },
   { href: "/unanswered",  label: "📭 Missed Q",     exact: false },
+  { href: "/audit",       label: "📋 Audit",        exact: false },
+  { href: "/eval",        label: "🧪 Eval",         exact: false },
+  { href: "/settings",    label: "🛠️ Settings",     exact: false },
 ];
 
 // ── Theme toggle (used inside NavBar — must render inside ThemeProvider) ──────
@@ -146,7 +149,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    if (pathname === "/login" || pathname === "/landing") {
+    if (pathname === "/login" || pathname === "/" || pathname === "/landing") {
       setReady(true);
       return;
     }
@@ -174,7 +177,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const pathname = usePathname();
 
   useEffect(() => {
-    setIsPublicPage(pathname === "/login" || pathname === "/landing");
+    setIsPublicPage(pathname === "/login" || pathname === "/" || pathname === "/landing");
   }, [pathname]);
 
   return (
@@ -186,7 +189,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <link rel="icon" href="/favicon.ico" type="image/x-icon" />
       </head>
       <body className="min-h-screen bg-slate-100 dark:bg-slate-950 transition-colors duration-200">
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+        <ThemeProvider attribute="class" defaultTheme="dark" disableTransitionOnChange>
           <AuthGuard>
             {!isPublicPage && <NavBar />}
             <main className={isPublicPage ? "" : "mx-auto max-w-7xl px-4 py-6"}>
@@ -197,8 +200,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 Enterprise LLM Wiki v0.2.0 · Powered by Ollama + Supabase
               </footer>
             )}
-            {/* Floating Chat — landing page only (customer demo) */}
-            {pathname === "/landing" && <FloatingChat />}
+            {/* Floating Chat — landing page (customer demo) */}
+            {(pathname === "/" || pathname === "/landing") && <FloatingChat />}
           </AuthGuard>
         </ThemeProvider>
       </body>

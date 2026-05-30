@@ -44,7 +44,7 @@ create table if not exists document_chunks (
   title text,
   chunk_index int not null default 0,
   content text not null,
-  embedding vector(768),
+  embedding vector(1024),
   metadata jsonb default '{}'::jsonb,
   created_at timestamptz default now()
 );
@@ -66,7 +66,7 @@ create table if not exists wiki_pages (
   summary text,
   content_markdown text not null,
   source_urls jsonb default '[]'::jsonb,
-  embedding vector(768),
+  embedding vector(1024),
   status text default 'draft',
   version int default 1,
   created_at timestamptz default now(),
@@ -81,7 +81,7 @@ create table if not exists canonical_qa (
   question text not null,
   normalized_question text not null,
   answer text not null,
-  embedding vector(768),
+  embedding vector(1024),
   priority int default 100,
   is_active boolean default true,
   created_at timestamptz default now()
@@ -104,7 +104,7 @@ create table if not exists answer_cache (
   question text not null,
   normalized_question text not null,
   answer text not null,
-  embedding vector(768),
+  embedding vector(1024),
   source_refs jsonb default '[]'::jsonb,
   created_at timestamptz default now(),
   updated_at timestamptz default now(),

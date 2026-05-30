@@ -26,7 +26,7 @@ export default function LoginPage() {
 
       if (res.ok) {
         setToken(apiKey.trim());
-        router.replace("/");
+        router.replace("/chat");
       } else {
         const data = await res.json().catch(() => ({}));
         setError(data.detail || "API key ไม่ถูกต้อง");
@@ -45,7 +45,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         {/* Back link */}
         <div className="mb-6 text-center">
-          <Link href="/landing"
+          <Link href="/"
             className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400
                        hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">
             ← กลับหน้าหลัก

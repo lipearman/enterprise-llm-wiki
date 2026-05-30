@@ -10,7 +10,7 @@ Chatbot · LLM Wiki · Knowledge Graph · Multi-Crawler · Multi-company · API 
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![Next.js](https://img.shields.io/badge/Next.js-14+-000000?style=flat-square&logo=nextdotjs&logoColor=white)
 ![Supabase](https://img.shields.io/badge/Supabase-Cloud-3ECF8E?style=flat-square&logo=supabase&logoColor=white)
-![pgvector](https://img.shields.io/badge/pgvector-768d-336791?style=flat-square&logo=postgresql&logoColor=white)
+![pgvector](https://img.shields.io/badge/pgvector-1024d-336791?style=flat-square&logo=postgresql&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)
 
 </div>
@@ -28,21 +28,25 @@ Enterprise LLM Wiki เป็น **full-stack knowledge management platform** �
 | 🕸️ **GraphRAG Knowledge Graph** | สกัด entity relationships ด้วย LLM → ขยาย context ผ่าน graph ตอน retrieval |
 | 🕷️ **Multi-Crawler Pipeline** | เลือก crawler backend ได้: Trafilatura · Playwright · crawl4ai — ต่อ request หรือ global |
 | 🔐 **API Key Authentication** | Middleware-based auth — Bearer token / X-API-Key header · Login page · auth guard |
+| 💬 **Floating Chat Widget** | Chatbot สาธารณะบนหน้า Landing — ตอบคำถามแบบ SSE streaming ไม่ต้องล็อกอิน |
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                    🌐 Frontend (Next.js 14+)                       │
-│  💬 Chat │ 📖 Wiki Viewer │ ❓ QA Editor │ 🔗 Sources │ ⚙️ Jobs  │
-└───────────────────────────┬──────────────────────────────────────┘
-                            │ REST API
-┌───────────────────────────▼──────────────────────────────────────┐
-│                    ⚡ Backend (FastAPI v0.2.0)                     │
-│  /chat │ /sources │ /wiki │ /wiki/qa │ /jobs │ /companies        │
-└──────┬──────────────────┬───────────────────┬────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                    🌐 Frontend (Next.js 14+)                          │
+│  🏠 Landing │ 💬 Admin Chat │ 📖 Wiki │ ❓ QA │ 🔗 Sources │ ⚙️ Jobs │
+│  📭 Missed Q                                                          │
+│  💬 Floating Chat Widget (public SSE streaming — ไม่ต้องล็อกอิน)      │
+└────────────────────────────┬─────────────────────────────────────────┘
+                             │ REST API
+┌────────────────────────────▼─────────────────────────────────────────┐
+│                    ⚡ Backend (FastAPI v0.2.0)                         │
+│  /chat · /public/chat · /sources · /wiki · /wiki/qa · /jobs          │
+│  /companies · /unanswered                                            │
+└──────┬──────────────────┬───────────────────┬─────────────────────────┘
        │                  │                   │
 ┌──────▼──────┐  ┌────────▼─────────┐  ┌──────▼───────────────────┐
 │ 🔍 Retrieval │  │  📥 Ingest       │  │  🔄 Worker / Scheduler   │
@@ -58,17 +62,21 @@ Enterprise LLM Wiki เป็น **full-stack knowledge management platform** �
        │         │ QA Generate      │
        │         │ Relationship Ext.│
        │         └────────┬─────────┘
-┌──────▼──────────────────▼──────────────────────────────────────┐
-│              🗄️ Supabase (PostgreSQL + pgvector)                 │
-│  wiki_pages · canonical_qa · document_chunks · wiki_relationships│
-│  knowledge_sources · source_pages · answer_cache · job_runs     │
-└──────────────────────────┬─────────────────────────────────────┘
+┌──────▼──────────────────▼──────────────────────────────────────────┐
+│              🗄️ Supabase (PostgreSQL + pgvector)                     │
+│  wiki_pages · canonical_qa · document_chunks · wiki_relationships   │
+│  knowledge_sources · source_pages · answer_cache · job_runs         │
+│  unanswered_questions                                               │
+└──────────────────────────┬─────────────────────────────────────────┘
                            │
-┌──────────────────────────▼─────────────────────────────────────┐
-│                         🤖 Ollama                                │
-│  ☁️ Cloud → Chat / Wiki / QA / Fact / Relationship Extraction   │
-│  💻 Local → Embeddings (nomic-embed-text · 768d)                │
-└────────────────────────────────────────────────────────────────┘
+┌──────────────────────────▼─────────────────────────────────────────┐
+│                         🤖 Ollama                                    │
+│  ☁️ Cloud (https://ollama.com)                                       │
+│     → Chat / Wiki / QA / Fact / Relationship Extraction             │
+│     → Model: gpt-oss:20b-cloud                                      │
+│  💻 Local (http://llm-server:11434)                                  │
+│     → Embeddings: mxbai-embed-large · 1024d                         │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -88,7 +96,7 @@ URL / File
   │       └─ crawl4ai        LLM-aware crawler    → Markdown คุณภาพสูงสุด
   │
   ├─ ✂️  Chunk               (LangChain Text Splitter)
-  ├─ 🔢  Embed               (Ollama Local · nomic-embed-text · 768d)
+  ├─ 🔢  Embed               (Ollama Local · mxbai-embed-large · 1024d)
   ├─ 💾  Save document_chunks + source_pages           ✅ searchable
   │
   ├─ 🧠  Extract Facts        (LLM)
@@ -99,22 +107,94 @@ URL / File
   └─ 💾  Save wiki_pages + canonical_qa + wiki_relationships  ✅ enriched
 ```
 
-### 💬 Chat Flow (with GraphRAG)
+### 💬 Chat Flow (with GraphRAG + SSE Streaming)
 
 ```
 Question
   │
-  ├─ [1] 🗃️  Answer Cache Search     threshold: 0.96  → ✅ return cached
-  ├─ [2] ❓  Canonical QA Search      threshold: 0.90  → ✅ return QA answer
-  ├─ [3] 📖  Wiki Page Vector Search  top_k: 20
-  │          Document Chunk Search    top_k: 20
+  ├─ [1] 🗃️  Answer Cache Search     threshold: 0.97  → ✅ return cached
+  ├─ [2] ❓  Canonical QA Search      threshold: 0.95  → ✅ return QA answer
+  ├─ [3] 📖  Wiki Page Vector Search  top_k: 40
+  │          Document Chunk Search    top_k: 40
   ├─ [4] 🕸️  Graph Expansion (GraphRAG)
   │          └─ wiki_relationships → find related entities → fetch related wiki pages
   ├─      🏷️  Metadata Boost         title/slug keyword scoring
-  ├─      📊  Merge & Sort by similarity → Top 5
-  ├─      🤖  LLM → Grounded Answer
-  └─      💾  Save to answer_cache
+  ├─      📊  Merge & Sort by similarity → Top 8 (after rerank)
+  ├─      🤖  LLM → Grounded Answer  (SSE streaming tokens)
+  ├─      💾  Save to answer_cache
+  └─      📭  No answer → Save to unanswered_questions
 ```
+
+### 💬 Floating Chat Flow (Public — no auth)
+
+```
+Visitor question (landing page)
+  │
+  ├─ POST /api/public/chat  (no API key required)
+  ├─ SSE stream  → token by token
+  └─ Same RAG pipeline as admin chat
+     → context not found → unanswered_questions saved automatically
+```
+
+### 🧠 เทคนิคการจัดการข้อความใน Chat Service
+
+#### 1. Python Ambiguity Gate — ตรวจคำกำกวมก่อน Cache
+
+`_build_clarify_response()` ทำงานเป็น **interceptor ตัวแรก** ก่อนที่คำถามจะเข้า pipeline ใดๆ:
+
+```
+คำถาม → Python Ambiguity Gate → ถ้ากำกวม → ถามผู้ใช้ทันที (ไม่เรียก LLM)
+                               → ถ้าชัดเจน → ผ่านต่อไป Cache / QA / RAG
+```
+
+- ตรวจ keyword เช่น `"ที่อยู่"` → แสดง choices `["ที่อยู่สาขา", "ที่อยู่สำนักงานใหญ่"]`
+- ถ้าคำถามมี choice อยู่แล้ว (เช่น `"ที่อยู่สาขา"`) → ผ่านต่อ ไม่วนถาม
+- Python เป็น **single source of truth** สำหรับ clarification — LLM prompt ไม่มีขั้นตอนถามกลับ
+
+#### 2. Query Isolation — แยก `question` กับ `retrieval_q`
+
+ระบบ rewrite query โดยเชื่อมคำถามก่อนหน้ากับคำถามปัจจุบัน (`retrieval_q`) เพื่อช่วย follow-up questions  
+แต่ถ้าใช้ `retrieval_q` ตลอดจะเกิด **history contamination**:
+
+```
+ผู้ใช้ถาม "ที่อยู่สำนักงานใหญ่" → cache บันทึก retrieval_q
+ผู้ใช้ถาม "ประกันรถยนต์"        → retrieval_q = "ที่อยู่สำนักงานใหญ่ ประกันรถยนต์"
+                                  → cache hit ผิด → ได้คำตอบที่อยู่แทน
+```
+
+แก้โดยแยกการใช้งาน:
+
+| ใช้ `question` (ต้นฉบับ) | ใช้ `retrieval_q` (enriched) |
+|---|---|
+| Answer Cache lookup | Vector Search (wiki + chunks) |
+| Canonical QA lookup | — |
+| LLM prompt QUESTION | — |
+
+#### 3. Non-Streaming Workaround สำหรับ Cloud LLM
+
+Cloud model (`gpt-oss:20b-cloud`) มีข้อจำกัด: เมื่อเรียกด้วย `stream=True` จะ **ไม่อ่าน CONTEXT** ที่ส่งไป ทำให้คำตอบผิดเสมอ
+
+แก้โดย `_generate_answer_stream()` เรียก non-streaming API ภายใน แล้ว yield ผลลัพธ์เป็น token เดียว:
+
+```python
+async def _generate_answer_stream(self, question, context, history):
+    answer = await self._generate_answer(question, context, history)  # stream=False
+    yield answer   # yield once — SSE ยังทำงานปกติ
+```
+
+ผู้ใช้ยังได้รับ SSE stream ตามปกติ แต่ LLM ทำงานแบบ non-streaming จริงๆ
+
+#### 4. Answer Cache Filtering — ไม่ cache คำตอบที่ไม่ดี
+
+`_save_answer_cache()` ตรวจก่อน upsert ทุกครั้ง:
+
+```
+ถ้าคำตอบมี "ขณะนี้ยังไม่มีข้อมูล..." → ข้าม (ไม่ cache)
+ถ้าคำตอบมี "หมายถึงอะไรครับ?"       → ข้าม (ไม่ cache clarification)
+ถ้าไม่มี context rows                → ข้าม (RAG ไม่ได้ข้อมูล)
+```
+
+ป้องกันคำตอบ "no data" หรือ clarification question ถูก cache และส่งกลับผู้ใช้ครั้งต่อไป
 
 ---
 
@@ -189,15 +269,26 @@ ENABLE_RELATIONSHIP_SEARCH=true
 
 ## 🎨 Frontend Pages
 
-| หน้า | URL | ฟีเจอร์ |
-|---|---|---|
-| 🔐 **Login** | `/login` | กรอก API Key · ตรวจสอบกับ `/api/auth/verify` · บันทึกใน sessionStorage |
-| 💬 **Chat** | `/` | Message history · typing indicator · source chips · mode badges · Force RAG |
-| 📖 **Wiki Viewer** | `/wiki` | Browse + search · ดู full content · แก้ไข · ลบ |
-| ❓ **QA Editor** | `/qa` | List/Create/Edit/Delete QA · toggle active · pagination · search |
-| 🔗 **Sources** | `/sources` | Add URL · Upload file · Crawler selector (3 backends) · deactivate |
-| ⚙️ **Jobs** | `/jobs` | Status monitor · auto-refresh · crawl trigger · expand job details |
-| 🕸️ **Knowledge Graph** | `/graph` | Force-directed graph · zoom/pan · click node → relationships · filter by type · search entity |
+| หน้า | URL | การเข้าถึง | ฟีเจอร์ |
+|---|---|---|---|
+| 🏠 **Landing** | `/` | 🌍 สาธารณะ | หน้าแรกของระบบ · แนะนำ features · Floating Chat Widget |
+| 🔐 **Login** | `/login` | 🌍 สาธารณะ | กรอก API Key · Demo key hint · ตรวจสอบกับ `/api/auth/verify` |
+| 💬 **Admin Chat** | `/chat` | 🔒 ต้องล็อกอิน | Message history · SSE streaming · source chips · mode badges · Force RAG |
+| 📖 **Wiki Viewer** | `/wiki` | 🔒 ต้องล็อกอิน | Browse + search · ดู full content · แก้ไข · ลบ |
+| ❓ **QA Editor** | `/qa` | 🔒 ต้องล็อกอิน | List/Create/Edit/Delete QA · toggle active · pagination · search |
+| 🔗 **Sources** | `/sources` | 🔒 ต้องล็อกอิน | Add URL · Upload file · Crawler selector (3 backends) · deactivate |
+| ⚙️ **Jobs** | `/jobs` | 🔒 ต้องล็อกอิน | Status monitor · auto-refresh · crawl trigger · expand job details |
+| 🕸️ **Knowledge Graph** | `/graph` | 🔒 ต้องล็อกอิน | Force-directed graph · zoom/pan · click node → relationships · filter by type |
+| 📭 **Missed Q** | `/unanswered` | 🔒 ต้องล็อกอิน | คำถามที่ RAG ตอบไม่ได้ · ทดสอบ 2 โหมด (RAG `force_rag=true` / Floating Chat streaming) · filter · export |
+| 📋 **Audit Logs** | `/audit` | 🔒 ต้องล็อกอิน | บันทึกการกระทำทั้งหมด · filter by action / company / status · paginated |
+
+### 💬 Floating Chat Widget
+
+Widget ถาม-ตอบแบบ SSE streaming ที่ฝังอยู่บนหน้า Landing (`/`) — **ไม่ต้องล็อกอิน**:
+- ปุ่ม chat icon มุมขวาล่าง → เปิด/ปิด dialog
+- พิมพ์คำถาม → ส่งไปยัง `/api/public/chat` → แสดงคำตอบแบบ token-by-token
+- แสดง sources ที่อ้างอิงหลังได้รับคำตอบ
+- คำถามที่ไม่มีข้อมูลถูกบันทึกลง `unanswered_questions` อัตโนมัติ
 
 ---
 
@@ -206,18 +297,19 @@ ENABLE_RELATIONSHIP_SEARCH=true
 | Layer | Technology | Purpose |
 |---|---|---|
 | 🐍 Backend | Python 3.11+, FastAPI 0.115, Uvicorn | REST API Server |
-| 🌐 Frontend | Next.js 14+, TypeScript, Tailwind CSS | Web UI (5 pages) |
+| 🌐 Frontend | Next.js 14+, TypeScript, Tailwind CSS | Web UI |
 | 🗄️ Database | Supabase Cloud, PostgreSQL | Primary Data Store |
-| 🔍 Vector Search | pgvector + IVFFlat index | ANN Similarity Search (768d cosine) |
+| 🔍 Vector Search | pgvector + IVFFlat index | ANN Similarity Search (1024d cosine) |
 | 🤖 LLM (Chat/Wiki/QA/Graph) | Ollama Cloud `gpt-oss:20b-cloud` | Generation |
-| 🔢 Embeddings | Ollama Local `nomic-embed-text` 768d | Vectorization |
+| 🔢 Embeddings | Ollama Local `mxbai-embed-large` 1024d | Vectorization |
 | 🕷️ Crawler 1 | Trafilatura + httpx + BeautifulSoup4 | Static HTML extraction (default) |
 | 🎭 Crawler 2 | Playwright 1.60 + Chromium | JS-rendered pages |
 | 🤖 Crawler 3 | crawl4ai 0.8.6 + Patchright | LLM-aware Markdown extraction |
 | ✂️ Chunking | LangChain Text Splitters | Document Splitting |
 | 📄 File Parsing | pypdf, python-docx, openpyxl | PDF / DOCX / XLSX |
-| ⏰ Jobs | APScheduler 3.11 | Background Scheduling (daily cron) |
+| ⏰ Jobs | APScheduler 3.11 | Background Scheduling (in-process, daily cron) |
 | 🔀 Reranker | FlashRank *(optional)* | Cross-encoder Reranking |
+| 🌐 Tunnel | cloudflared | Cloudflare Quick Tunnel (dev/demo) |
 | 🐳 Deploy | Docker, Docker Compose | Containerization |
 | 🔁 CI/CD | GitHub Actions | Auto test on push (main + master) |
 
@@ -230,7 +322,7 @@ ENABLE_RELATIONSHIP_SEARCH=true
 | `companies` | 🏢 Multi-tenant company registry |
 | `knowledge_sources` | 📌 Source registry (URL / file) |
 | `source_pages` | 📄 Raw crawled pages + `content_hash` สำหรับ change detection |
-| `document_chunks` | 🧩 Text chunks with 768d vector embeddings |
+| `document_chunks` | 🧩 Text chunks with 1024d vector embeddings |
 | `extracted_facts` | 🧠 Structured facts extracted by LLM |
 | `wiki_pages` | 📖 LLM-generated wiki pages with vector embeddings |
 | `canonical_qa` | ❓ Curated Q&A pairs with embeddings (CRUD-able) |
@@ -240,6 +332,8 @@ ENABLE_RELATIONSHIP_SEARCH=true
 | `chat_sessions` | 💬 Chat session metadata |
 | `chat_messages` | 📝 Individual messages per session |
 | `user_feedback` | ⭐ User rating & feedback on answers |
+| `unanswered_questions` | 📭 **คำถามที่ RAG ตอบไม่ได้** — บันทึกอัตโนมัติเมื่อไม่มีข้อมูล |
+| `audit_logs` | 📋 **Audit trail** — บันทึก action, IP, api_key_tag, company, status, detail (JSONB) |
 
 > All vector columns use `ivfflat` index with `vector_cosine_ops` for fast ANN search.
 
@@ -252,7 +346,7 @@ ENABLE_RELATIONSHIP_SEARCH=true
 - 🐍 Python 3.11+
 - 🟢 Node.js 20+
 - ☁️ [Supabase](https://supabase.com) project (pgvector enabled)
-- 🤖 Ollama running locally for embeddings
+- 🤖 Ollama running locally (`http://localhost:11434`) for embeddings with `mxbai-embed-large`
 
 ### 1️⃣ Clone & Configure
 
@@ -268,10 +362,18 @@ cp .env.example .env
 รัน SQL scripts ตามลำดับใน Supabase SQL Editor:
 
 ```
-backend/sql/001_extensions.sql   ← Enable pgvector
-backend/sql/002_schema.sql       ← สร้าง tables + indexes ทั้งหมด
-backend/sql/003_rpc.sql          ← สร้าง RPC functions สำหรับ vector search
+backend/sql/001_extensions.sql           ← Enable pgvector
+backend/sql/002_schema.sql               ← สร้าง tables + indexes ทั้งหมด (1024d)
+backend/sql/003_rpc.sql                  ← สร้าง RPC functions สำหรับ vector search (1024d)
+backend/sql/007_unanswered_questions.sql ← สร้าง unanswered_questions table
+backend/sql/009_audit_logs.sql          ← สร้าง audit_logs table
 ```
+
+> **Upgrading from a previous install?** ถ้าเคยรันกับ `nomic-embed-text` (768d) แล้วเปลี่ยนมาใช้ `mxbai-embed-large` (1024d) ให้รัน migration เพิ่มก่อน:
+> ```
+> backend/sql/008_update_embedding_dim_1024.sql  ← migration 768d → 1024d
+> ```
+> จากนั้น re-ingest ข้อมูลทั้งหมดผ่าน `POST /api/jobs/crawl-all`
 
 ### 3️⃣ Run Backend
 
@@ -311,6 +413,42 @@ npm run dev
 
 ---
 
+## 🌐 Cloudflare Tunnel (Dev / Demo)
+
+สำหรับแชร์ระบบออกสู่ internet แบบชั่วคราวโดยไม่ต้อง deploy:
+
+### Prerequisites
+
+```bash
+# ติดตั้ง cloudflared
+winget install Cloudflare.cloudflared   # Windows
+brew install cloudflared                # macOS
+```
+
+### รัน Tunnel
+
+```powershell
+# 1. เปิด backend + frontend ตามปกติก่อน
+# 2. รัน tunnel script (สร้าง 2 tunnels: backend :8080 + frontend :3000)
+.\tunnel.ps1
+```
+
+สคริปต์จะ:
+1. สร้าง Cloudflare Quick Tunnel สำหรับ backend (port 8080) และ frontend (port 3000)
+2. อัปเดต `ALLOW_ORIGINS=*` ใน `backend/.env`
+3. Restart backend อัตโนมัติ
+
+### รัน Frontend ในโหมด Tunnel
+
+```bash
+cd frontend
+npm run dev:tunnel    # = next dev --hostname 0.0.0.0
+```
+
+> Next.js server-side rewrite ส่ง `/api/*` ไปยัง backend โดย browser ไม่ได้คุยกับ backend โดยตรง → ไม่มีปัญหา CORS
+
+---
+
 ## 🐳 Docker Compose
 
 ```bash
@@ -339,11 +477,14 @@ OLLAMA_BASE_URL=https://ollama.com
 OLLAMA_API_KEY=YOUR_KEY
 OLLAMA_CHAT_MODEL=gpt-oss:20b-cloud
 
-# Ollama Local (Embeddings)
-OLLAMA_EMBED_BASE_URL=http://127.0.0.1:11434
-OLLAMA_EMBED_MODEL=nomic-embed-text
-EMBEDDING_DIM=768
+# Ollama Local (Embeddings — ต้องรัน local Ollama ที่มี mxbai-embed-large)
+OLLAMA_EMBED_BASE_URL=http://localhost:11434
+OLLAMA_EMBED_MODEL=mxbai-embed-large
+EMBEDDING_DIM=1024
 ```
+
+> **หมายเหตุ**: Cloud Ollama (`https://ollama.com`) รองรับเฉพาะ chat model — ไม่มี embedding model
+> ต้องใช้ local Ollama สำหรับ embeddings เสมอ
 
 ### Authentication Settings
 
@@ -356,6 +497,8 @@ API_KEY_ENABLED=true     # false = ข้ามการตรวจสอบท
 หลังตั้งค่า `API_KEY` ในไฟล์ `.env` ผู้ใช้จะต้องกรอก API Key ที่หน้า Login ก่อนใช้งาน Frontend  
 Key จะถูกเก็บใน `sessionStorage` และส่งไปกับทุก request เป็น `Authorization: Bearer <key>`
 
+> หน้า Login มี **Demo Key hint** — แสดงค่า key สำหรับทดสอบพร้อมปุ่มกรอกอัตโนมัติ
+
 ### Crawler Settings
 
 ```env
@@ -367,10 +510,10 @@ CRAWLER_BACKEND=trafilatura
 
 ```env
 DEFAULT_COMPANY_CODE=DEVES
-RETRIEVAL_TOP_K=20           # จำนวน candidates ก่อน rerank
-RERANK_TOP_K=5               # จำนวน context ส่งให้ LLM
-CANONICAL_THRESHOLD=0.90     # ความคล้ายขั้นต่ำสำหรับ canonical QA
-ANSWER_CACHE_THRESHOLD=0.96  # ความคล้ายขั้นต่ำสำหรับ cache hit
+RETRIEVAL_TOP_K=40           # จำนวน candidates ก่อน rerank
+RERANK_TOP_K=8               # จำนวน context ส่งให้ LLM
+CANONICAL_THRESHOLD=0.95     # ความคล้ายขั้นต่ำสำหรับ canonical QA
+ANSWER_CACHE_THRESHOLD=0.97  # ความคล้ายขั้นต่ำสำหรับ cache hit
 SIMILARITY_THRESHOLD=0.35    # ความคล้ายขั้นต่ำสำหรับ vector search
 ```
 
@@ -382,18 +525,21 @@ DAILY_CRAWL_CRON_HOUR=2      # ชั่วโมงที่รัน daily cra
 DAILY_CRAWL_CRON_MINUTE=0    # นาทีที่รัน
 ```
 
+> APScheduler ทำงานใน process เดียวกับ FastAPI (`lifespan()`) — ไม่ใช่ OS cron หรือ Celery  
+> รีสตาร์ท backend = รีสตาร์ท scheduler (cron schedule จะเริ่มนับใหม่)
+
 ### 🎛️ Feature Flags
 
 | Flag | Default | Description |
 |---|---|---|
-| `ENABLE_ANSWER_CACHE` | `true` | 🗃️ Semantic cache — fastest retrieval path |
+| `ENABLE_ANSWER_CACHE` | `false` | 🗃️ Semantic cache — fastest retrieval path |
 | `ENABLE_CANONICAL_QA` | `true` | ❓ Pre-generated QA lookup before RAG |
 | `ENABLE_WIKI_SEARCH` | `true` | 📖 Include wiki pages in context retrieval |
 | `ENABLE_CHUNK_SEARCH` | `true` | 🧩 Include raw document chunks in retrieval |
 | `ENABLE_RELATIONSHIP_SEARCH` | `true` | 🕸️ GraphRAG — graph-based context expansion |
 | `ENABLE_METADATA_SEARCH` | `true` | 🏷️ Boost score ด้วย title/slug keyword matching |
 | `ENABLE_RERANKER` | `false` | 🔀 FlashRank cross-encoder reranking |
-| `ENABLE_QUERY_REWRITE` | `false` | ✏️ LLM-based query rewriting |
+| `ENABLE_QUERY_REWRITE` | `true` | ✏️ LLM-based query rewriting |
 | `ENABLE_GROUNDING` | `true` | 📌 Source-grounded answer generation |
 | `ENABLE_SCHEDULER` | `true` | ⏰ APScheduler daily crawl |
 
@@ -403,9 +549,26 @@ DAILY_CRAWL_CRON_MINUTE=0    # นาทีที่รัน
 
 ### 💬 Chat
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/chat` | ถามคำถาม — 4-layer RAG + GraphRAG |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/chat` | 🔒 | ถามคำถาม — 4-layer RAG + GraphRAG (JSON response) |
+| `GET` | `/api/chat/stream` | 🔒 | ถามคำถาม — SSE streaming response |
+| `POST` | `/api/public/chat` | 🌍 | Public chat สำหรับ Floating Widget (SSE streaming) |
+
+### 📭 Unanswered Questions
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/unanswered` | 🔒 | List คำถามที่ RAG ตอบไม่ได้ |
+| `PATCH` | `/api/unanswered/{id}` | 🔒 | Mark as resolved / add note |
+| `DELETE` | `/api/unanswered/{id}` | 🔒 | Delete record |
+
+### 📋 Audit Logs
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/audit/logs` | 🔒 | Paginated audit log (filter: `company_code`, `action`, `status`) |
+| `GET` | `/api/audit/actions` | 🔒 | List known action names สำหรับ filter dropdown |
 
 ### 🔗 Sources
 
@@ -467,7 +630,7 @@ DAILY_CRAWL_CRON_MINUTE=0    # นาทีที่รัน
 |---|---|---|---|
 | `POST` | `/api/auth/verify` | ❌ | ตรวจสอบ API key — login endpoint |
 
-> Public paths (no token needed): `/`, `/api/health`, `/api/auth/verify`, `/docs`, `/redoc`, `/openapi.json`  
+> Public paths (no token needed): `/api/public/*`, `/api/health`, `/api/auth/verify`, `/docs`, `/redoc`, `/openapi.json`  
 > ดู interactive docs ทั้งหมดได้ที่ `http://localhost:8080/docs`
 
 ---
@@ -480,10 +643,12 @@ enterprise-llm-wiki/
 ├── 🐍 backend/
 │   ├── app/
 │   │   ├── api/               # FastAPI route handlers
-│   │   │   ├── chat.py
+│   │   │   ├── chat.py        # Admin chat (auth required)
+│   │   │   ├── public_chat.py # Public chat SSE (no auth)
 │   │   │   ├── sources.py     # URL + file upload
 │   │   │   ├── wiki.py        # wiki pages + QA + relationships
 │   │   │   ├── jobs.py        # job monitor + crawl trigger
+│   │   │   ├── unanswered.py  # unanswered questions CRUD
 │   │   │   ├── companies.py   # multi-tenant management
 │   │   │   ├── auth.py        # POST /api/auth/verify
 │   │   │   └── health.py
@@ -499,33 +664,45 @@ enterprise-llm-wiki/
 │   │       │   ├── playwright_crawler.py
 │   │       │   ├── crawl4ai_crawler.py
 │   │       │   └── factory.py
-│   │       ├── crawler_service.py    # façade
-│   │       ├── retrieval_service.py  # 4-layer + GraphRAG
+│   │       ├── crawler_service.py       # façade
+│   │       ├── retrieval_service.py     # 4-layer + GraphRAG
 │   │       ├── relationship_service.py  # entity graph
 │   │       ├── wiki_service.py
 │   │       ├── qa_service.py
-│   │       ├── chat_service.py
+│   │       ├── chat_service.py          # answer() + answer_stream() + unanswered tracking
+│   │       ├── ollama_client.py         # Ollama HTTP client (chat + embed)
 │   │       ├── extraction_service.py
 │   │       ├── chunking_service.py
 │   │       ├── file_loader_service.py
 │   │       └── job_service.py
-│   ├── scripts/
 │   ├── sql/
+│   │   ├── 001_extensions.sql
+│   │   ├── 002_schema.sql
+│   │   ├── 003_rpc.sql
+│   │   └── 007_unanswered_questions.sql
 │   ├── requirements.txt
 │   └── Dockerfile
 │
 ├── 🌐 frontend/
 │   ├── app/
-│   │   ├── page.tsx           # 💬 Chat (message history, source chips)
+│   │   ├── page.tsx           # 🏠 Landing (public — hero, features, FloatingChat)
+│   │   ├── landing/page.tsx   # ↩️ Redirect → / (backward compat)
+│   │   ├── chat/page.tsx      # 💬 Admin Chat (SSE streaming, source chips)
 │   │   ├── wiki/page.tsx      # 📖 Wiki Viewer (search, edit, delete)
 │   │   ├── qa/page.tsx        # ❓ QA Editor (CRUD + pagination)
 │   │   ├── sources/page.tsx   # 🔗 Sources (crawler selector)
 │   │   ├── jobs/page.tsx      # ⚙️ Job Monitor (auto-refresh)
-│   │   ├── login/page.tsx     # 🔐 Login (API key form)
-│   │   └── layout.tsx         # Nav bar + AuthGuard (redirect → /login if no token)
+│   │   ├── graph/page.tsx     # 🕸️ Knowledge Graph (force-directed)
+│   │   ├── unanswered/page.tsx # 📭 Missed Q (unanswered questions + dual RAG / Floating Chat test)
+│   │   ├── login/page.tsx     # 🔐 Login (API key form + demo key hint)
+│   │   └── layout.tsx         # Nav bar + AuthGuard + ThemeProvider
+│   ├── components/
+│   │   └── FloatingChat.tsx   # 💬 Floating chat widget (SSE streaming)
 │   ├── lib/
 │   │   └── api.ts             # apiFetch() — Bearer token injector
-│   ├── package.json
+│   ├── public/
+│   │   └── favicon.svg        # 🧠 Neural network icon
+│   ├── package.json           # dev:tunnel script included
 │   └── Dockerfile
 │
 ├── 📚 docs/
@@ -535,6 +712,7 @@ enterprise-llm-wiki/
 │   ├── COMPLETE_PROJECT_INSTRUCTION.md
 │   └── API_EXAMPLES.http
 │
+├── tunnel.ps1                 # 🌐 Cloudflare Quick Tunnel script (Windows)
 ├── .env.example
 ├── .gitignore
 ├── docker-compose.yml
@@ -551,7 +729,8 @@ enterprise-llm-wiki/
 | Phase 2 — LLM Wiki | ✅ Done | Fact extraction, wiki generation, canonical QA |
 | Phase 3 — Enterprise Jobs | ✅ Done | Multi-crawler, APScheduler, change detection, file upload, job monitor UI |
 | Phase 3.5 — GraphRAG | ✅ Done | Entity relationship extraction, graph expansion in retrieval, QA CRUD, full frontend |
-| Phase 4 — Production | 🔄 In Progress | ~~Authentication~~ ✅ · ~~Docker hardening~~ ✅ · ~~Input validation~~ ✅ · ~~Structured logging~~ ✅ · ~~RLS per company~~ ✅ · ~~Rate limiting~~ ✅ · ~~Crawler retry~~ ✅ · ~~Job retry~~ ✅ · audit logs · evaluation (Ragas/DeepEval) |
+| Phase 3.8 — Public Demo | ✅ Done | Landing page, Floating Chat widget (SSE), unanswered question tracking, Cloudflare tunnel |
+| Phase 4 — Production | ✅ Done | ~~Authentication~~ · ~~Docker hardening~~ · ~~Input validation~~ · ~~Structured logging~~ · ~~RLS per company~~ · ~~Rate limiting~~ · ~~Crawler retry~~ · ~~Job retry~~ · ~~Audit logs~~ · ~~RAG Evaluation (Ragas)~~ · ~~Embedding upgrade (bge-m3)~~ · ~~Multilingual reranker~~ |
 | Phase 5 — Agentic | 📋 Planned | LangGraph planner, multi-step retrieval, validation agent, full GraphRAG traversal |
 
 ---

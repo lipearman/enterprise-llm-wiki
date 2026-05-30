@@ -8,10 +8,11 @@ DELETE /api/unanswered/{id}      — delete a record
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.db.supabase_client import supabase
+from app.services.audit_service import audit_log
 
 router = APIRouter(prefix="/api/unanswered", tags=["unanswered"])
 
@@ -63,7 +64,7 @@ class ResolvePayload(BaseModel):
 
 
 @router.patch("/{item_id}/resolve")
-def resolve_question(item_id: str, body: ResolvePayload = ResolvePayload()):
+def resolve_question(item_id: str, request: Request, body: ResolvePayload = ResolvePayload()):
     """Mark a question as resolved, with an optional admin note."""
     data: dict = {
         "is_resolved": True,
@@ -75,13 +76,19 @@ def resolve_question(item_id: str, body: ResolvePayload = ResolvePayload()):
     res = supabase.table("unanswered_questions").update(data).eq("id", item_id).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Question not found")
+    audit_log(
+        "unanswered.resolve",
+        request=request,
+        detail={"question_id": item_id, "has_note": body.note is not None},
+    )
     return {"ok": True}
 
 
 # ── Delete ─────────────────────────────────────────────────────────────────────
 
 @router.delete("/{item_id}")
-def delete_question(item_id: str):
+def delete_question(item_id: str, request: Request):
     """Delete an unanswered question record."""
     supabase.table("unanswered_questions").delete().eq("id", item_id).execute()
+    audit_log("unanswered.delete", request=request, detail={"question_id": item_id})
     return {"ok": True}

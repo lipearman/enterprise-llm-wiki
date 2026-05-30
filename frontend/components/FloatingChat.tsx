@@ -364,22 +364,19 @@ export default function FloatingChat() {
                             <span className="inline-block w-0.5 h-[1em] bg-current align-middle ml-0.5 animate-pulse" />
                           )}
                         </p>
-                        {/* Sources — shown only when backend deems content too rich */}
-                        {m.role === "bot" && m.sources && m.sources.length > 0 && (
+                        {/* Sources — only items with a URL */}
+                        {m.role === "bot" && m.sources && m.sources.filter(s => s.url).length > 0 && (
                           <div className="mt-2.5 pt-2 border-t border-indigo-200 dark:border-slate-600 space-y-1.5">
                             <p className="text-[10px] font-semibold text-indigo-500 dark:text-indigo-400 uppercase tracking-wide flex items-center gap-1">
                               <BookOpen size={9} /> แหล่งข้อมูล
                             </p>
-                            {m.sources.map((s, i) => (
+                            {m.sources.filter(s => s.url).map((s, i) => (
                               <div key={i} className="flex items-center gap-1.5 text-xs opacity-80">
                                 <span className="w-1 h-1 rounded-full bg-indigo-400 shrink-0" />
-                                {s.url
-                                  ? <a href={s.url} target="_blank" rel="noopener noreferrer"
-                                       className="underline hover:opacity-100 truncate">
-                                      {s.title}
-                                    </a>
-                                  : <span className="truncate">{s.title}</span>
-                                }
+                                <a href={s.url!} target="_blank" rel="noopener noreferrer"
+                                   className="underline hover:opacity-100 truncate">
+                                  {s.title}
+                                </a>
                               </div>
                             ))}
                           </div>

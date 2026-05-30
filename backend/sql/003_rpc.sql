@@ -1,5 +1,5 @@
 create or replace function match_document_chunks(
-  query_embedding vector(768),
+  query_embedding vector(1024),
   match_company_code text,
   match_threshold float,
   match_count int
@@ -28,7 +28,7 @@ as $$
 $$;
 
 create or replace function match_wiki_pages(
-  query_embedding vector(768),
+  query_embedding vector(1024),
   match_company_code text,
   match_threshold float,
   match_count int
@@ -58,7 +58,7 @@ as $$
 $$;
 
 create or replace function match_canonical_qa(
-  query_embedding vector(768),
+  query_embedding vector(1024),
   match_company_code text,
   match_threshold float,
   match_count int
@@ -86,7 +86,7 @@ as $$
 $$;
 
 create or replace function match_answer_cache(
-  query_embedding vector(768),
+  query_embedding vector(1024),
   match_company_code text,
   match_threshold float,
   match_count int

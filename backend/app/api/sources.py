@@ -1,7 +1,7 @@
 import os
 import tempfile
 from typing import Optional
-from fastapi import APIRouter, BackgroundTasks, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Request, UploadFile, File, Form, HTTPException
 from app.schemas.source import AddUrlRequest, CrawlerBackend
 from app.schemas.common import JobCreated
 from app.services.job_service import job_service
@@ -9,6 +9,7 @@ from app.jobs.runner import run_pending_jobs_once
 from app.db.supabase_client import supabase
 from app.core.config import settings
 from app.services.crawlers.factory import BACKENDS
+from app.services.audit_service import audit_log
 
 router = APIRouter(prefix="/api/sources", tags=["sources"])
 
@@ -151,16 +152,23 @@ async def clean_chunk_content(company_code: str | None = None):
 
 
 @router.delete("/{source_id}")
-def delete_source(source_id: str):
-    res = supabase.table("knowledge_sources").select("id").eq("id", source_id).limit(1).execute()
+def delete_source(source_id: str, request: Request):
+    res = supabase.table("knowledge_sources").select("id,source_url,source_name,company_code").eq("id", source_id).limit(1).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Source not found")
+    row = res.data[0]
     supabase.table("knowledge_sources").update({"is_active": False}).eq("id", source_id).execute()
+    audit_log(
+        "source.delete",
+        request=request,
+        company_code=row.get("company_code"),
+        detail={"source_id": source_id, "source_url": row.get("source_url"), "source_name": row.get("source_name")},
+    )
     return {"ok": True, "message": "Source deactivated"}
 
 
 @router.post("/url", response_model=JobCreated)
-async def add_url(req: AddUrlRequest, background_tasks: BackgroundTasks):
+async def add_url(req: AddUrlRequest, background_tasks: BackgroundTasks, request: Request):
     """
     Ingest a URL into the knowledge base.
 
@@ -180,12 +188,19 @@ async def add_url(req: AddUrlRequest, background_tasks: BackgroundTasks):
         company_code,
     )
     background_tasks.add_task(run_pending_jobs_once, 1)
+    audit_log(
+        "source.add_url",
+        request=request,
+        company_code=company_code,
+        detail={"url": str(req.url), "crawler_backend": backend, "job_id": job_id},
+    )
     return JobCreated(job_id=job_id, status="pending")
 
 
 @router.post("/file", response_model=JobCreated)
 async def upload_file(
     background_tasks: BackgroundTasks,
+    request: Request,
     file: UploadFile = File(...),
     company_code: str = Form(default=None),
     run_deep_enrichment: bool = Form(default=True),
@@ -218,6 +233,12 @@ async def upload_file(
         company_code,
     )
     background_tasks.add_task(_run_file_ingest, tmp_path, company_code, run_deep_enrichment, job_id)
+    audit_log(
+        "source.add_file",
+        request=request,
+        company_code=company_code,
+        detail={"filename": file.filename, "file_size_kb": round(len(content) / 1024, 1), "job_id": job_id},
+    )
     return JobCreated(job_id=job_id, status="pending")
 
 

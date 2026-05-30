@@ -108,22 +108,42 @@ class RetrievalService:
         rows = []
 
         if settings.ENABLE_WIKI_SEARCH:
-            res = supabase.rpc("match_wiki_pages", {
-                "query_embedding": q_emb,
-                "match_company_code": company_code,
-                "match_threshold": settings.SIMILARITY_THRESHOLD,
-                "match_count": settings.RETRIEVAL_TOP_K,
-            }).execute()
-            rows.extend([{**x, "source_type": "wiki"} for x in (res.data or [])])
+            try:
+                res = supabase.rpc("match_wiki_pages", {
+                    "query_embedding": q_emb,
+                    "match_company_code": company_code,
+                    "match_threshold": settings.SIMILARITY_THRESHOLD,
+                    "match_count": settings.RETRIEVAL_TOP_K,
+                }).execute()
+                wiki_rows = res.data or []
+                rows.extend([{**x, "source_type": "wiki"} for x in wiki_rows])
+                logger.debug("vector_search_wiki | found=%d | company=%s", len(wiki_rows), company_code)
+            except Exception as exc:
+                logger.warning(
+                    "vector_search_wiki_error | company=%s | %s: %s — "
+                    "check embedding dimension (stored vs query). "
+                    "Run sql/008_update_embedding_dim_1024.sql if you switched models.",
+                    company_code, type(exc).__name__, exc,
+                )
 
         if settings.ENABLE_CHUNK_SEARCH:
-            res = supabase.rpc("match_document_chunks", {
-                "query_embedding": q_emb,
-                "match_company_code": company_code,
-                "match_threshold": settings.SIMILARITY_THRESHOLD,
-                "match_count": settings.RETRIEVAL_TOP_K,
-            }).execute()
-            rows.extend([{**x, "source_type": "chunk"} for x in (res.data or [])])
+            try:
+                res = supabase.rpc("match_document_chunks", {
+                    "query_embedding": q_emb,
+                    "match_company_code": company_code,
+                    "match_threshold": settings.SIMILARITY_THRESHOLD,
+                    "match_count": settings.RETRIEVAL_TOP_K,
+                }).execute()
+                chunk_rows = res.data or []
+                rows.extend([{**x, "source_type": "chunk"} for x in chunk_rows])
+                logger.debug("vector_search_chunks | found=%d | company=%s", len(chunk_rows), company_code)
+            except Exception as exc:
+                logger.warning(
+                    "vector_search_chunks_error | company=%s | %s: %s — "
+                    "check embedding dimension (stored vs query). "
+                    "Run sql/008_update_embedding_dim_1024.sql if you switched models.",
+                    company_code, type(exc).__name__, exc,
+                )
 
         # ── Text search: compensates for Thai embedding limitations ──────────
         # mxbai-embed-large gives near-identical vectors for Thai text, so
@@ -165,7 +185,44 @@ class RetrievalService:
                     existing_ids.add(r.get("id"))
 
         rows.sort(key=lambda x: x.get("similarity", 0), reverse=True)
-        return rows[: settings.RERANK_TOP_K]
+
+        # ── FlashRank reranker (optional) ─────────────────────────────────
+        if settings.ENABLE_RERANKER and rows:
+            rows = self._rerank(question, rows)
+
+        result = rows[: settings.RERANK_TOP_K]
+        logger.info(
+            "search_context | company=%s | total_rows=%d | returned=%d | reranker=%s | q=%r",
+            company_code, len(rows), len(result), settings.ENABLE_RERANKER, question[:60],
+        )
+        return result
+
+    @staticmethod
+    def _rerank(question: str, rows: list[dict]) -> list[dict]:
+        """Re-rank rows with FlashRank cross-encoder and return sorted list."""
+        try:
+            from flashrank import Ranker, RerankRequest
+
+            ranker = Ranker(model_name="ms-marco-MultiBERT-L-12", cache_dir="/tmp/flashrank")
+            passages = [
+                {
+                    "id":   i,
+                    "text": r.get("content_markdown") or r.get("content") or r.get("answer") or "",
+                }
+                for i, r in enumerate(rows)
+            ]
+            rerank_req = RerankRequest(query=question, passages=passages)
+            result     = ranker.rerank(rerank_req)
+
+            # Map scores back and re-sort
+            score_map = {item["id"]: item["score"] for item in result}
+            for i, r in enumerate(rows):
+                r["rerank_score"] = score_map.get(i, 0.0)
+            rows.sort(key=lambda x: x.get("rerank_score", 0.0), reverse=True)
+            logger.debug("reranker | reranked %d rows", len(rows))
+        except Exception as exc:
+            logger.warning("reranker | skipped: %s", exc)
+        return rows
 
     @staticmethod
     def _get_semantic_keywords(q: str) -> list[str]:

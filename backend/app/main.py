@@ -15,6 +15,8 @@ from app.api.companies import router as companies_router
 from app.api.auth import router as auth_router
 from app.api.public_chat import router as public_chat_router
 from app.api.unanswered import router as unanswered_router
+from app.api.bot_settings import router as bot_settings_router
+from app.api.audit import router as audit_router
 
 
 # ── Startup validation ────────────────────────────────────────────────────────
@@ -127,6 +129,8 @@ app.include_router(wiki_router)
 app.include_router(jobs_router)
 app.include_router(companies_router)
 app.include_router(unanswered_router)
+app.include_router(bot_settings_router)
+app.include_router(audit_router)
 
 
 @app.get("/")
