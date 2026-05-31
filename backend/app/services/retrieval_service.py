@@ -265,18 +265,20 @@ class RetrievalService:
 
     @staticmethod
     def _dedupe_by_content(rows: list[dict]) -> list[dict]:
-        """Drop rows whose content duplicates an already-kept row.
+        """Drop rows that are *exact* content duplicates of an already-kept row.
 
-        Fingerprints the first 200 non-space characters of each chunk's text.
-        The same boilerplate ingested under different URLs/titles collapses to
-        one entry; the first occurrence (highest similarity, list is pre-sorted)
-        is kept. Rows without content are always kept.
+        The fingerprint is the whitespace-normalized FULL content. This removes
+        boilerplate ingested verbatim under several URLs/titles, while keeping
+        chunks that merely share a header but differ in the body (e.g. two
+        "Company Profile" chunks — one with the founding capital, one with the
+        current capital — must both survive). The first occurrence (highest
+        similarity, list is pre-sorted) is kept.
         """
         seen: set[str] = set()
         out: list[dict] = []
         for r in rows:
             content = (r.get("content_markdown") or r.get("content") or r.get("answer") or "")
-            key = "".join(content.split())[:200]
+            key = "".join(content.split())
             if not key:
                 out.append(r)
                 continue
@@ -406,6 +408,27 @@ class RetrievalService:
                 out.append(substr)
         return out
 
+    @staticmethod
+    def _dedupe_terms(terms: list[str], cap: int = 20) -> list[str]:
+        """Unique, order-preserving search terms safe for a PostgREST `or` filter.
+
+        Drops terms containing characters that would break the comma/dot-delimited
+        or-filter syntax, and caps the count to keep the request URL bounded.
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+        for t in terms:
+            t = t.strip()
+            if not t or t in seen:
+                continue
+            if any(c in t for c in (",", ".", "*", "(", ")", ":")):
+                continue
+            seen.add(t)
+            out.append(t)
+            if len(out) >= cap:
+                break
+        return out
+
     async def _text_search_wiki(self, question: str, company_code: str) -> list[dict]:
         """Sliding-window substring search on wiki_pages title AND content_markdown.
 
@@ -426,72 +449,50 @@ class RetrievalService:
         # Adaptive step: fine-grained for short queries, coarser for long ones
         step = 1 if len(q_search) <= 12 else 2
         substrings = self._make_search_windows(q_search, win_len=7, step=step)
-
-        # Add semantic synonyms so "เบอร์โทร" also searches "โทรศัพท์", etc.
         semantic_kws = self._get_semantic_keywords(q_search)
+        terms = self._dedupe_terms(substrings + semantic_kws)
         logger.debug(
-            "text_search_wiki | q=%r | stripped=%r | windows=%s | synonyms=%s",
-            question[:40], q_search[:30], substrings, semantic_kws,
+            "text_search_wiki | q=%r | stripped=%r | terms=%d",
+            question[:40], q_search[:30], len(terms),
         )
+        if not terms:
+            return []
 
         hits: dict[str, dict] = {}   # id → row + counters
 
         def _add_row(row: dict, title_hit: bool) -> None:
             rid = str(row["id"])
             if rid not in hits:
-                hits[rid] = {**row, "source_type": "wiki", "_cnt": 0, "_title": False}
-            hits[rid]["_cnt"] += 1
-            if title_hit:
+                title   = row.get("title") or ""
+                content = row.get("content_markdown") or ""
+                # Count distinct matched terms in-memory (no extra DB calls) so
+                # rows matching more of the query rank higher.
+                cnt = sum(1 for t in terms if t in title or t in content)
+                hits[rid] = {**row, "source_type": "wiki", "_cnt": max(cnt, 1), "_title": title_hit}
+            elif title_hit:
                 hits[rid]["_title"] = True
 
-        for substr in substrings:
-            try:
-                # ── Title search (strong signal) ─────────────────────────
-                for row in (
-                    supabase.table("wiki_pages")
-                    .select("id,title,slug,content_markdown,source_urls")
-                    .eq("company_code", company_code)
-                    .ilike("title", f"%{substr}%")
-                    .limit(5).execute().data or []
-                ):
-                    _add_row(row, title_hit=True)
+        # Two combined OR-queries replace ~2×N sequential ILIKE calls.
+        try:
+            title_or = ",".join(f"title.ilike.*{t}*" for t in terms)
+            for row in (
+                supabase.table("wiki_pages")
+                .select("id,title,slug,content_markdown,source_urls")
+                .eq("company_code", company_code)
+                .or_(title_or).limit(30).execute().data or []
+            ):
+                _add_row(row, title_hit=True)
 
-                # ── Content search (weaker signal) ────────────────────────
-                for row in (
-                    supabase.table("wiki_pages")
-                    .select("id,title,slug,content_markdown,source_urls")
-                    .eq("company_code", company_code)
-                    .ilike("content_markdown", f"%{substr}%")
-                    .limit(3).execute().data or []
-                ):
-                    _add_row(row, title_hit=False)
-
-            except Exception as exc:
-                logger.warning("text_search_wiki | substr=%r | err=%s", substr[:12], exc)
-
-        # ── Semantic synonym search ────────────────────────────────────────
-        # Handles cases where the DB uses a different Thai/English word for
-        # the same concept (e.g. wiki says "โทรศัพท์" but user asked "เบอร์โทร")
-        for kw in semantic_kws:
-            try:
-                for row in (
-                    supabase.table("wiki_pages")
-                    .select("id,title,slug,content_markdown,source_urls")
-                    .eq("company_code", company_code)
-                    .ilike("title", f"%{kw}%")
-                    .limit(5).execute().data or []
-                ):
-                    _add_row(row, title_hit=True)
-                for row in (
-                    supabase.table("wiki_pages")
-                    .select("id,title,slug,content_markdown,source_urls")
-                    .eq("company_code", company_code)
-                    .ilike("content_markdown", f"%{kw}%")
-                    .limit(3).execute().data or []
-                ):
-                    _add_row(row, title_hit=False)
-            except Exception as exc:
-                logger.warning("text_search_wiki | kw=%r | err=%s", kw[:12], exc)
+            content_or = ",".join(f"content_markdown.ilike.*{t}*" for t in terms)
+            for row in (
+                supabase.table("wiki_pages")
+                .select("id,title,slug,content_markdown,source_urls")
+                .eq("company_code", company_code)
+                .or_(content_or).limit(30).execute().data or []
+            ):
+                _add_row(row, title_hit=False)
+        except Exception as exc:
+            logger.warning("text_search_wiki | or_query | err=%s", exc)
 
         out = []
         for row in hits.values():
@@ -518,41 +519,31 @@ class RetrievalService:
         step = 1 if len(q_search) <= 12 else 2
         substrings = self._make_search_windows(q_search, win_len=7, step=step)
         semantic_kws = self._get_semantic_keywords(q_search)
+        terms = self._dedupe_terms(substrings + semantic_kws)
+        if not terms:
+            return []
 
         hits: dict[str, dict] = {}
 
         def _add_chunk(row: dict) -> None:
             rid = str(row["id"])
             if rid not in hits:
-                hits[rid] = {**row, "source_type": "chunk", "_cnt": 0}
-            hits[rid]["_cnt"] += 1
+                content = row.get("content") or ""
+                cnt = sum(1 for t in terms if t in content)
+                hits[rid] = {**row, "source_type": "chunk", "_cnt": max(cnt, 1)}
 
-        for substr in substrings:
-            try:
-                for row in (
-                    supabase.table("document_chunks")
-                    .select("id,title,content,source_url")
-                    .eq("company_code", company_code)
-                    .ilike("content", f"%{substr}%")
-                    .limit(5).execute().data or []
-                ):
-                    _add_chunk(row)
-            except Exception as exc:
-                logger.warning("text_search_chunks | substr=%r | err=%s", substr[:12], exc)
-
-        # Semantic synonym search for chunks
-        for kw in semantic_kws:
-            try:
-                for row in (
-                    supabase.table("document_chunks")
-                    .select("id,title,content,source_url")
-                    .eq("company_code", company_code)
-                    .ilike("content", f"%{kw}%")
-                    .limit(3).execute().data or []
-                ):
-                    _add_chunk(row)
-            except Exception as exc:
-                logger.warning("text_search_chunks | kw=%r | err=%s", kw[:12], exc)
+        # Single combined OR-query replaces ~N sequential ILIKE calls.
+        try:
+            content_or = ",".join(f"content.ilike.*{t}*" for t in terms)
+            for row in (
+                supabase.table("document_chunks")
+                .select("id,title,content,source_url")
+                .eq("company_code", company_code)
+                .or_(content_or).limit(50).execute().data or []
+            ):
+                _add_chunk(row)
+        except Exception as exc:
+            logger.warning("text_search_chunks | or_query | err=%s", exc)
 
         out = []
         for row in hits.values():

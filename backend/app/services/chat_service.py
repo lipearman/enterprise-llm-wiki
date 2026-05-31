@@ -737,13 +737,103 @@ QUESTION: {question}"""
         messages.extend(history)   # previous user/assistant turns
         messages.append({"role": "user", "content": current_prompt})
 
-        # Answer generation backend is configurable (see ANSWER_LLM_USE_LOCAL):
-        #   - cloud chat_llm + OLLAMA_CHAT_MODEL    → fast, default
-        #   - local_llm (llm-server) + ANSWER_LLM_MODEL → slower but follows
-        #     question-type rules more reliably (e.g. address vs capital).
+        answer = await self._call_answer_llm(messages)
+
+        # ── Answer grounding check (fact-substitution guard) ──────────────────
+        # Catch the case where the LLM answers a *different* fact than asked
+        # (e.g. returns "ทุนจดทะเบียน 500 ล้าน" for an address question). The
+        # check is a cheap deterministic string test; the extra LLM call only
+        # fires on a detected mismatch (rare), so average latency is unaffected.
+        qtype = self._detect_question_type(question)
+        if (
+            qtype
+            and not self._is_no_answer_text(answer)
+            and not self._answer_matches_type(answer, qtype)
+        ):
+            logger.info(
+                "answer_grounding_mismatch | qtype=%s | retrying | q=%r | a=%r",
+                qtype, question[:60], answer[:50],
+            )
+            retry_msgs = messages + [
+                {"role": "assistant", "content": answer},
+                {"role": "user", "content": (
+                    f"คำตอบยังไม่ตรงคำถาม คำถามถามหา{self._QTYPE_LABEL[qtype]}เท่านั้น "
+                    f"ถ้า CONTEXT มี{self._QTYPE_LABEL[qtype]} ให้ตอบเฉพาะส่วนนั้น "
+                    f"ถ้าไม่มีให้ตอบ 'ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ'"
+                )},
+            ]
+            try:
+                retry = await self._call_answer_llm(retry_msgs)
+                # Keep the retry only if it fixed the type (or admitted no-data);
+                # otherwise keep the original answer.
+                if self._is_no_answer_text(retry) or self._answer_matches_type(retry, qtype):
+                    answer = retry
+            except Exception as exc:
+                # Retry failed (e.g. rate limit) — keep the original answer.
+                logger.warning("answer_grounding_retry_failed | %s", exc)
+
+        return answer
+
+    async def _call_answer_llm(self, messages: list[dict]) -> str:
+        """Call the configured answer-generation LLM (cloud or llm-server)."""
         if settings.ANSWER_LLM_USE_LOCAL:
             return await local_llm.chat(messages, model=settings.ANSWER_LLM_MODEL)
         return await chat_llm.chat(messages, model=settings.OLLAMA_CHAT_MODEL)
+
+    # ── Answer grounding helpers ──────────────────────────────────────────────
+    _QTYPE_LABEL = {
+        "location": "สถานที่/ที่อยู่",
+        "amount":   "จำนวนเงิน/ตัวเลข",
+        "date":     "วัน/เดือน/ปี",
+        "phone":    "เบอร์โทรศัพท์",
+    }
+    # Question keywords → expected answer type
+    _QTYPE_KEYWORDS = {
+        "location": ("ที่ไหน", "อยู่ที่ไหน", "ที่อยู่", "ตั้งอยู่", "สถานที่", "ที่ตั้ง"),
+        "amount":   ("เท่าไหร่", "เท่าไร", "กี่บาท", "ทุนจดทะเบียน", "ราคาเท่า"),
+        "date":     ("เมื่อไหร่", "ปีไหน", "ปีอะไร", "วันที่เท่าไหร่", "ก่อตั้งเมื่อ"),
+        "phone":    ("เบอร์โทร", "เบอร์ติดต่อ", "โทรศัพท์", "เบอร์อะไร"),
+    }
+    # Markers that must appear in the answer for it to match the question type
+    _QTYPE_MARKERS = {
+        "location": ("ถนน", "แขวง", "เขต", "ตำบล", "อำเภอ", "จังหวัด", "อาคาร",
+                     "เลขที่", "ซอย", "กรุงเทพ", "ชั้น "),
+        "amount":   ("บาท", "ล้าน",),
+        "date":     ("25", "พ.ศ", "ปี ", "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน",
+                     "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน",
+                     "ตุลาคม", "พฤศจิกายน", "ธันวาคม"),
+        "phone":    ("โทร", "1291", "02", "0-2", "ต่อ "),
+    }
+
+    @staticmethod
+    def _is_no_answer_text(answer: str) -> bool:
+        """Lightweight text-only no-answer / clarify check (no DB/context needed),
+        used by the grounding guard to skip answers that legitimately have no
+        type-specific content."""
+        a = answer or ""
+        return ("ยังไม่มีข้อมูล" in a) or ("หมายถึงอะไร" in a) or ("ไม่พบข้อมูล" in a)
+
+    @classmethod
+    def _detect_question_type(cls, question: str) -> str | None:
+        """Return 'location'/'amount'/'date'/'phone' if the question clearly asks
+        for that fact type, else None. Only the first match wins."""
+        q = question
+        for qtype, kws in cls._QTYPE_KEYWORDS.items():
+            if any(kw in q for kw in kws):
+                return qtype
+        return None
+
+    @classmethod
+    def _answer_matches_type(cls, answer: str, qtype: str) -> bool:
+        """True if the answer contains at least one marker of the expected type
+        (or a digit run for phone), i.e. it actually answers what was asked."""
+        markers = cls._QTYPE_MARKERS.get(qtype, ())
+        if any(m in answer for m in markers):
+            return True
+        if qtype == "phone":
+            import re
+            return bool(re.search(r"\d{3,}", answer))
+        return False
 
     async def _save_unanswered_question(
         self,

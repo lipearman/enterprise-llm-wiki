@@ -117,13 +117,14 @@ Question
   ├─ [2] ❓  Canonical QA Search      Qwen2.5 match → n-gram verify (≥0.18) → ✅ QA answer
   ├─ [3] 📖  Wiki Page Vector Search  top_k: 40
   │          Document Chunk Search    top_k: 40
-  │          + Text Search (ชดเชย vector ที่อ่อนกับไทย)
+  │          + Text Search (or-filter — ชดเชย vector ที่อ่อนกับไทย, ~3.5s)
   ├─ [4] 🕸️  Graph Expansion (GraphRAG)
   │          └─ wiki_relationships → find related entities → fetch related wiki pages
   ├─      🏷️  Metadata Boost         title/slug keyword scoring
   ├─      📊  Merge & Sort by similarity
-  ├─      🧹  De-dup content          ตัด chunk ซ้ำ → Top 8
+  ├─      🧹  De-dup content (full)   ตัด chunk ซ้ำเป๊ะ → Top 8
   ├─      🤖  LLM → Grounded Answer  (cloud หรือ llm-server, SSE streaming)
+  ├─      🛡️  Grounding Check         คำตอบตรงประเภทคำถามไหม → retry ถ้า fact-substitution
   ├─      💾  Save to answer_cache    (ข้าม "no data"/clarify)
   └─      📭  No answer → Save to unanswered_questions
 ```
@@ -223,9 +224,11 @@ async def _generate_answer_stream(self, question, context, history):
 
 #### 7. Content De-duplication — ตัด chunk ซ้ำก่อนส่ง LLM
 
-`_dedupe_by_content()` ตัด chunk ที่มีเนื้อหาซ้ำ (boilerplate/nav/footer ที่ถูก ingest หลาย URL) โดยใช้ fingerprint 200 ตัวอักษรแรก เก็บเฉพาะตัว similarity สูงสุด → คืน context slot ให้ chunk ที่เกี่ยวข้องจริง (ช่วย Context Precision/Recall)
+`_dedupe_by_content()` ตัด chunk ที่มีเนื้อหา**ซ้ำเป๊ะ** (boilerplate/nav/footer ที่ถูก ingest หลาย URL) โดย fingerprint = **full content** (whitespace-normalized) เก็บตัว similarity สูงสุด → คืน context slot ให้ chunk ที่เกี่ยวข้องจริง
 
-#### 8. Question-Type Matching — ตอบตรงประเภทคำถาม
+> **⚠️ บทเรียน:** เดิมใช้ fingerprint 200 ตัวแรก แต่ chunk คนละเนื้อหาที่ขึ้นต้น header เหมือนกัน (เช่น "Company Profile" 2 อัน — อันหนึ่งทุนเริ่มต้น อีกอันทุนปัจจุบัน) โดน collapse ผิด → เปลี่ยนเป็น full-content เพื่อลบเฉพาะที่ซ้ำจริง
+
+#### 8. Question-Type Matching — ตอบตรงประเภทคำถาม (LLM prompt)
 
 LLM prompt มีกฎ: คำตอบต้องตรง "ประเภท" ของคำถาม แม้ CONTEXT มีข้อมูลอื่นปน
 ```
@@ -233,6 +236,22 @@ LLM prompt มีกฎ: คำตอบต้องตรง "ประเภ�
 ถาม "เมื่อไหร่/ปีไหน" → ตอบวัน/เวลา
 ถาม "เท่าไหร่"        → ตอบจำนวน
 ```
+
+#### 9. Answer Grounding Check — จับ fact-substitution หลัง generate
+
+ด่านสุดท้ายหลัง LLM ตอบ: ตรวจ **deterministic** ว่าคำตอบ "ตรงประเภท" คำถามไหม (ต่อยอดจาก #8 แต่บังคับได้จริง ไม่พึ่ง LLM ทำตาม prompt)
+
+```
+_detect_question_type(q)  → location/amount/date/phone  (keyword match)
+_answer_matches_type(a,t) → คำตอบมี marker ของประเภทนั้นไหม
+                            location → ถนน/แขวง/เขต/อาคาร/เลขที่...
+                            amount   → บาท/ล้าน  | date → 25xx/เดือน  | phone → digits
+```
+
+ถ้าคำถามถามหา type หนึ่งแต่คำตอบ**ไม่มี marker ของ type นั้น** (เช่น ถามที่อยู่ ตอบ "ทุนจดทะเบียน 500 ล้าน") → **retry 1 ครั้ง**ด้วย prompt เข้มขึ้น แล้วเก็บ retry เฉพาะเมื่อแก้ถูก (หรือยอมตอบ "ไม่มีข้อมูล")
+
+- **ไม่เพิ่ม latency บน path ปกติ** — check เป็น string match (~0ms) retry fire เฉพาะตอน mismatch (หายาก)
+- **Resilient** — retry ล้ม (rate limit) → คงคำตอบแรกไว้ ไม่พัง
 
 ---
 
@@ -251,6 +270,41 @@ ANSWER_LLM_MODEL=qwen2.5:14b-instruct # ใช้เมื่อ USE_LOCAL=true
 ```
 
 > Ingestion models (Fact/Wiki/QA extraction) ใช้ cloud เสมอ — toggle นี้กระทบเฉพาะการ generate คำตอบ chat
+
+---
+
+## ⚡ Retrieval Latency Optimization
+
+Text search ของไทยใช้ **sliding-window substring** (mxbai แยกไทยไม่ได้ ต้องชดเชยด้วย ILIKE) เดิมยิง Supabase ทีละ window:
+
+```
+"ที่อยู่สำนักงานใหญ่ของบริษัทเทเวศ..." → ~25 windows × (title + content) × (wiki + chunks)
+                                        = 60-80 ILIKE query เรียงต่อกัน
+                                        → ~19 วินาที (คอขวดจริงของทั้งระบบ)
+```
+
+**แก้: รวม windows เป็น PostgREST `or` filter query เดียวต่อ column**
+
+```python
+# เดิม: N queries เรียงกัน
+for w in windows:
+    supabase.table("document_chunks").ilike("content", f"%{w}%").execute()   # ~0.3s ต่อตัว
+
+# ใหม่: 1 query รวมทุก window
+or_filter = ",".join(f"content.ilike.*{w}*" for w in terms)
+supabase.table("document_chunks").or_(or_filter).limit(50).execute()        # ~0.3s ตัวเดียว
+```
+
+| | เดิม | ใหม่ |
+|---|---|---|
+| Supabase calls / คำถาม | 60-80 | **3** |
+| Retrieval latency | ~19.4s | **~3.5s** (5× เร็วขึ้น) |
+
+- `_cnt` (จำนวน window ที่ match สำหรับ scoring) คำนวณใน Python จาก row ที่ดึงมา (ไม่ต้องยิง DB เพิ่ม)
+- `_dedupe_terms()` ตัด term ซ้ำ + sanitize อักขระที่ทำ or-filter พัง (`, . * ( ) :`) + cap 20 term กัน URL ยาวเกิน
+- `limit` สูงพอ (chunks 50, wiki 30) เพื่อรักษา recall (or-filter คืน top-N ตาม default order ต้องดึงเผื่อ)
+
+> **บทเรียน:** คอขวด latency ไม่ใช่ LLM แต่เป็น **DB round-trips** — model ทุกขนาด (4B–14B) latency เท่ากันเพราะ retrieval กลบหมด แก้ retrieval ช่วยทุก backend
 
 ---
 
