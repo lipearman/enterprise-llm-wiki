@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "https://ollama.com"
     OLLAMA_API_KEY: str = ""
     OLLAMA_CHAT_MODEL: str = "gpt-oss:20b-cloud"
+    # ── Chat answer generation backend ───────────────────────────────────────
+    # ANSWER_LLM_USE_LOCAL=false → cloud OLLAMA_CHAT_MODEL via chat_llm
+    #   (fast ~5-11s, good quality; gpt-oss:20b-cloud occasionally answers the
+    #    wrong fact for formally-phrased questions, and is subject to cloud
+    #    rate limits).
+    # ANSWER_LLM_USE_LOCAL=true → ANSWER_LLM_MODEL via local_llm (llm-server)
+    #   (follows question-type rules more reliably, no rate limits, but slower
+    #    on the local GPU — qwen2.5:7b ~25-35s, 14b ~80s per answer).
+    # Ingestion models (FACT/WIKI/QA below) always use the cloud.
+    ANSWER_LLM_USE_LOCAL: bool = False
+    ANSWER_LLM_MODEL: str = "qwen2.5:14b-instruct"
     FACT_EXTRACTION_MODEL: str = "gpt-oss:20b-cloud"
     WIKI_GENERATION_MODEL: str = "gpt-oss:20b-cloud"
     QA_GENERATION_MODEL: str = "gpt-oss:20b-cloud"

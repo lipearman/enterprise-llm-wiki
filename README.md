@@ -112,16 +112,19 @@ URL / File
 ```
 Question
   │
+  ├─ [0] 🧩  Smart Clarify Gate       คำถามกำกวม + ไม่เฉพาะ → ถามกลับ (ไม่เรียก LLM)
   ├─ [1] 🗃️  Answer Cache Search     threshold: 0.97  → ✅ return cached
-  ├─ [2] ❓  Canonical QA Search      threshold: 0.95  → ✅ return QA answer
+  ├─ [2] ❓  Canonical QA Search      Qwen2.5 match → n-gram verify (≥0.18) → ✅ QA answer
   ├─ [3] 📖  Wiki Page Vector Search  top_k: 40
   │          Document Chunk Search    top_k: 40
+  │          + Text Search (ชดเชย vector ที่อ่อนกับไทย)
   ├─ [4] 🕸️  Graph Expansion (GraphRAG)
   │          └─ wiki_relationships → find related entities → fetch related wiki pages
   ├─      🏷️  Metadata Boost         title/slug keyword scoring
-  ├─      📊  Merge & Sort by similarity → Top 8 (after rerank)
-  ├─      🤖  LLM → Grounded Answer  (SSE streaming tokens)
-  ├─      💾  Save to answer_cache
+  ├─      📊  Merge & Sort by similarity
+  ├─      🧹  De-dup content          ตัด chunk ซ้ำ → Top 8
+  ├─      🤖  LLM → Grounded Answer  (cloud หรือ llm-server, SSE streaming)
+  ├─      💾  Save to answer_cache    (ข้าม "no data"/clarify)
   └─      📭  No answer → Save to unanswered_questions
 ```
 
@@ -195,6 +198,59 @@ async def _generate_answer_stream(self, question, context, history):
 ```
 
 ป้องกันคำตอบ "no data" หรือ clarification question ถูก cache และส่งกลับผู้ใช้ครั้งต่อไป
+
+#### 5. Smart Clarify — ไม่ถาม clarify เมื่อคำถามเฉพาะเจาะจงแล้ว
+
+`_has_specific_context()` ป้องกันการถาม clarify เกินเหตุ เมื่อคำถามมี context เฉพาะอยู่แล้ว:
+
+```
+"ขอเอกสารหน่อย"                          → ตัด keyword + filler เหลือ "" → ถาม clarify
+"เอกสารที่ต้องใช้ในการซื้อประกันรถยนต์"   → เหลือ "ซื้อประกันรถยนต์" (≥9 ตัว) → ตอบเลย
+```
+
+ตัด ambiguous keyword + Thai filler ออก ถ้าเหลือเนื้อหาเฉพาะ ≥ 9 ตัวอักษร ถือว่าผู้ใช้รู้ว่าต้องการอะไรแล้ว
+
+#### 6. Canonical QA Verification Gate — character n-gram (ไม่ใช่ embedding)
+
+หลัง Qwen2.5 เลือก canonical QA แล้ว ตรวจซ้ำด้วย **character-n-gram Jaccard overlap** ระหว่างคำถามผู้ใช้กับ canonical question ถ้า overlap < 0.18 → ปฏิเสธ → ตกไป RAG
+
+```
+"ที่อยู่สำนักงานใหญ่..."  vs  "โครงสร้างผู้ถือหุ้น..."  → jaccard 0.165 < 0.18 → reject ✅
+"ทุนจดทะเบียน...เท่าไหร่" vs  "ทุนจดทะเบียนของเทเวศเท่าไหร่" → jaccard 0.449 → pass
+```
+
+> **⚠️ สำคัญ:** ใช้ n-gram ไม่ใช่ embedding cosine เพราะ **`mxbai-embed-large` ให้ vector เกือบเหมือนกันหมดสำหรับข้อความภาษาไทย** (cosine ≈ 1.0 แม้คนละเรื่อง) — vector search ภาษาไทยจึงอ่อน ต้องชดเชยด้วย text search + character n-gram
+
+#### 7. Content De-duplication — ตัด chunk ซ้ำก่อนส่ง LLM
+
+`_dedupe_by_content()` ตัด chunk ที่มีเนื้อหาซ้ำ (boilerplate/nav/footer ที่ถูก ingest หลาย URL) โดยใช้ fingerprint 200 ตัวอักษรแรก เก็บเฉพาะตัว similarity สูงสุด → คืน context slot ให้ chunk ที่เกี่ยวข้องจริง (ช่วย Context Precision/Recall)
+
+#### 8. Question-Type Matching — ตอบตรงประเภทคำถาม
+
+LLM prompt มีกฎ: คำตอบต้องตรง "ประเภท" ของคำถาม แม้ CONTEXT มีข้อมูลอื่นปน
+```
+ถาม "ที่ไหน/ที่อยู่"  → ตอบสถานที่ (ห้ามตอบทุนจด/ปีก่อตั้ง)
+ถาม "เมื่อไหร่/ปีไหน" → ตอบวัน/เวลา
+ถาม "เท่าไหร่"        → ตอบจำนวน
+```
+
+---
+
+## 🤖 Answer Generation Backend (configurable)
+
+Generation model ของคำตอบ chat สลับได้ผ่าน `.env` โดยไม่ต้องแก้ code:
+
+| `ANSWER_LLM_USE_LOCAL` | Backend | ความเร็ว | หมายเหตุ |
+|---|---|---|---|
+| `false` (default) | Cloud `gpt-oss:20b-cloud` | ⚡ 5-15s | คุณภาพดี แต่มี rate limit · บางคำถาม formal phrasing ตอบ fact ผิด |
+| `true` | llm-server `ANSWER_LLM_MODEL` | 🐢 25-80s | ตาม question-type rule แม่นกว่า · ไม่มี rate limit · ช้ากว่าบน local GPU |
+
+```env
+ANSWER_LLM_USE_LOCAL=false           # cloud (เร็ว, default)
+ANSWER_LLM_MODEL=qwen2.5:14b-instruct # ใช้เมื่อ USE_LOCAL=true
+```
+
+> Ingestion models (Fact/Wiki/QA extraction) ใช้ cloud เสมอ — toggle นี้กระทบเฉพาะการ generate คำตอบ chat
 
 ---
 
@@ -477,11 +533,22 @@ OLLAMA_BASE_URL=https://ollama.com
 OLLAMA_API_KEY=YOUR_KEY
 OLLAMA_CHAT_MODEL=gpt-oss:20b-cloud
 
+# Chat answer backend (toggle cloud ↔ local — see "Answer Generation Backend")
+ANSWER_LLM_USE_LOCAL=false              # false = cloud (เร็ว, default) | true = llm-server
+ANSWER_LLM_MODEL=qwen2.5:14b-instruct   # ใช้เมื่อ ANSWER_LLM_USE_LOCAL=true
+
+# Local LLM server (canonical QA matching, query rewrite, optional answer gen)
+LOCAL_LLM_BASE_URL=http://llm-server:11434
+
 # Ollama Local (Embeddings — ต้องรัน local Ollama ที่มี mxbai-embed-large)
 OLLAMA_EMBED_BASE_URL=http://localhost:11434
 OLLAMA_EMBED_MODEL=mxbai-embed-large
 EMBEDDING_DIM=1024
 ```
+
+> **⚠️ Embedding model & ภาษาไทย:** `mxbai-embed-large` ให้ vector เกือบเหมือนกันสำหรับข้อความไทย
+> ทำให้ vector search อ่อนกับไทย — ระบบชดเชยด้วย text search + character n-gram matching
+> หากเปลี่ยน embedding model ต้อง re-embed ทั้ง DB และจูน threshold ใหม่ทั้งหมด
 
 > **หมายเหตุ**: Cloud Ollama (`https://ollama.com`) รองรับเฉพาะ chat model — ไม่มี embedding model
 > ต้องใช้ local Ollama สำหรับ embeddings เสมอ

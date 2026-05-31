@@ -68,10 +68,7 @@ async def _run_one(question: str, company_code: str) -> dict | None:
       2. RAG retrieval — always run so Ragas gets real context chunks to evaluate
     """
     try:
-        # ── Step 1: Check canonical QA (same as production) ──────────────────
-        qa = await retrieval_service.match_canonical_qa(question, company_code)
-
-        # ── Step 2: RAG retrieval — always needed for context metrics ─────────
+        # ── Contexts: real RAG retrieval (for Ragas context metrics) ─────────
         rows = await retrieval_service.search_context(question, company_code)
         contexts: list[str] = [
             r.get("content_markdown") or r.get("content") or r.get("answer") or ""
@@ -79,17 +76,17 @@ async def _run_one(question: str, company_code: str) -> dict | None:
         ]
         contexts = [c.strip() for c in contexts if c.strip()]
 
-        # ── Step 3: Answer — canonical QA wins, else generate from RAG ────────
-        if qa is not None:
-            # match_canonical_qa returns a dict or a schema object
-            answer = qa.answer if hasattr(qa, "answer") else (qa.get("answer") or "")
-        else:
-            context_str = chat_service._build_context(rows)
-            answer = await chat_service._generate_answer(
-                chat_service._coerce_to_question(question),
-                context_str,
-                [],
-            )
+        # ── Answer: the EXACT production path (answer cache → canonical QA →
+        # clarify → RAG → generate). Evaluating this means the scores reflect
+        # what a real user actually receives, not a simplified RAG-only path.
+        result = await chat_service.answer(
+            question=question,
+            company_code=company_code,
+            force_rag=False,
+            session_id=f"eval_{abs(hash(question)) % 100000}",
+            track_unanswered=False,
+        )
+        answer = result.answer if hasattr(result, "answer") else str(result)
         return {"contexts": contexts, "answer": answer}
     except Exception as exc:
         import traceback

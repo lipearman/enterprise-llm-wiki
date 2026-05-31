@@ -8,21 +8,32 @@ from app.db.supabase_client import supabase
 logger = logging.getLogger(__name__)
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    """Cosine similarity of two equal-length vectors. Returns 0.0 if degenerate."""
-    if not a or not b or len(a) != len(b):
+def _char_ngrams(text: str, n: int = 3) -> set[str]:
+    """Character n-grams of *text* with whitespace removed (Thai has no word
+    boundaries, so character n-grams are a segmentation-free overlap signal)."""
+    s = "".join(text.split())
+    if len(s) < n:
+        return {s} if s else set()
+    return {s[i : i + n] for i in range(len(s) - n + 1)}
+
+
+def _ngram_jaccard(a: str, b: str, n: int = 3) -> float:
+    """Jaccard overlap of character n-grams — robust for Thai, deterministic."""
+    ga, gb = _char_ngrams(a, n), _char_ngrams(b, n)
+    if not ga or not gb:
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
+    inter = len(ga & gb)
+    union = len(ga | gb)
+    return inter / union if union else 0.0
 
 
-# Minimum embedding similarity between the user question and the LLM-selected
-# canonical question. The Qwen2.5 matcher can occasionally pick a loosely
-# related entry (e.g. claim-document Q&A for an unrelated query); this gate
-# rejects those so the request falls through to full RAG instead.
-CANONICAL_VERIFY_MIN_SIM = 0.80
+# Minimum character-n-gram overlap between the user question and the
+# LLM-selected canonical question. Embedding cosine is unusable here because
+# mxbai-embed-large returns near-identical vectors for *all* Thai text, so the
+# gate uses a segmentation-free lexical overlap instead. Rejects matches where
+# the Qwen matcher picked an entry that only shares the company name (e.g.
+# "โครงสร้างผู้ถือหุ้น" matched to an address question) → falls through to RAG.
+CANONICAL_VERIFY_MIN_OVERLAP = 0.18
 
 
 class RetrievalService:
@@ -113,31 +124,29 @@ class RetrievalService:
                 if 0 <= idx < len(candidates):
                     matched = candidates[idx]
 
-                    # ── Verification gate ────────────────────────────────────
-                    # Confirm the LLM-picked canonical question is actually
-                    # semantically close via embedding similarity. Rejects loose
-                    # matches (e.g. claim-document Q&A picked for an unrelated
-                    # query) so the request falls through to full RAG.
-                    try:
-                        q_emb  = await embed_llm.embed(normalize_question(question))
-                        c_emb  = await embed_llm.embed(normalize_question(matched["question"]))
-                        sim    = _cosine(q_emb, c_emb)
-                    except Exception as e:
-                        logger.warning("canonical_qa_verify_error | err=%s", e)
-                        sim = 0.0
-
-                    if sim < CANONICAL_VERIFY_MIN_SIM:
+                    # ── Verification gate (lexical overlap) ──────────────────
+                    # Confirm the LLM-picked canonical question shares real
+                    # wording with the user question. Uses character-n-gram
+                    # Jaccard because mxbai embeddings can't distinguish Thai
+                    # text. Rejects matches sharing only the company name (e.g.
+                    # "โครงสร้างผู้ถือหุ้น" picked for an address question) →
+                    # the request then falls through to full RAG.
+                    overlap = _ngram_jaccard(
+                        normalize_question(question),
+                        normalize_question(matched.get("question", "")),
+                    )
+                    if overlap < CANONICAL_VERIFY_MIN_OVERLAP:
                         logger.info(
-                            "canonical_qa_rejected_low_sim | sim=%.3f < %.2f | q=%r | canonical=%r",
-                            sim, CANONICAL_VERIFY_MIN_SIM,
+                            "canonical_qa_rejected_low_overlap | overlap=%.3f < %.2f | q=%r | canonical=%r",
+                            overlap, CANONICAL_VERIFY_MIN_OVERLAP,
                             question[:60], matched.get("question", "")[:60],
                         )
                         return None
 
                     matched["similarity"] = 1.0   # verified match → treat as exact
                     logger.info(
-                        "canonical_qa_llm_matched | sim=%.3f | q=%r | canonical=%r",
-                        sim, question[:80], matched.get("question", "")[:80],
+                        "canonical_qa_llm_matched | overlap=%.3f | q=%r | canonical=%r",
+                        overlap, question[:80], matched.get("question", "")[:80],
                     )
                     return matched
             logger.debug(

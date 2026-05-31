@@ -188,6 +188,12 @@ class ChatService:
                 # treat the question as specific enough → don't ask again.
                 if any(choice in q for choice in choices):
                     return None
+                # If the question carries substantial specific context beyond the
+                # keyword and common filler, the user has already expressed clear
+                # intent (e.g. "เอกสารที่ต้องใช้ในการซื้อประกันรถยนต์") → answer
+                # from context instead of asking a needless clarifying question.
+                if self._has_specific_context(q, keyword):
+                    return None
                 bullets = "\n".join(f"• {c}" for c in choices)
                 return (
                     f'"{keyword}" หมายถึงอะไรครับ?\n'
@@ -196,6 +202,29 @@ class ChatService:
                 )
 
         return None
+
+    # Common Thai particles / filler that carry no disambiguating intent.
+    _FILLER_TOKENS = (
+        "เอกสาร", "ที่", "ต้อง", "ใช้", "ใน", "การ", "มี", "อะไร", "บ้าง",
+        "ของ", "หน่อย", "ขอ", "ครับ", "คะ", "ค่ะ", "จะ", "ได้", "เป็น",
+        "และ", "หรือ", "กับ", "ให้", "อยาก", "ช่วย", "ทราบ", "อยาก",
+    )
+
+    @classmethod
+    def _has_specific_context(cls, question: str, keyword: str) -> bool:
+        """True when the question carries specific intent beyond *keyword*.
+
+        Strips the ambiguous keyword and common Thai filler, then checks whether
+        meaningful content remains. A bare query like "ขอเอกสารหน่อย" reduces to
+        nothing (→ still ambiguous), while "เอกสารที่ต้องใช้ในการซื้อประกันรถยนต์"
+        leaves "ซื้อประกันรถยนต์" (→ specific, skip the clarifying question).
+        """
+        remainder = question.replace(keyword, "")
+        for tok in cls._FILLER_TOKENS:
+            remainder = remainder.replace(tok, "")
+        remainder = "".join(remainder.split())
+        # ≥ 9 Thai characters of leftover content ≈ at least one real topic word.
+        return len(remainder) >= 9
 
     def _is_no_answer(self, answer: str, context_rows: list[dict], company_code: str) -> bool:
         """Return True when the bot effectively couldn't answer the question.
@@ -691,6 +720,12 @@ class ChatService:
 10. ถ้าถามว่า "มีกี่..." หรือ "มีอะไรบ้าง" → ระบุเฉพาะรายการที่ปรากฏใน CONTEXT เท่านั้น ห้ามนับหรือสรุปจำนวนเองถ้า CONTEXT ไม่ได้ระบุตัวเลขไว้ชัดเจน
 11. ประโยคแรกต้องตอบตรงคำถามที่ถามเสมอ เช่น "บริษัทก่อตั้งปี 2490 ครับ" หรือ "ทุนจดทะเบียน 500 ล้านบาทครับ" จากนั้นจึงขยายรายละเอียด
 12. ตอบเฉพาะสิ่งที่คำถามถามเท่านั้น ห้ามเพิ่มหัวข้ออื่นที่ไม่เกี่ยวข้องกับคำถาม
+13. คำตอบต้องตรงกับ "ประเภท" ของคำถาม แม้ CONTEXT จะมีข้อมูลอื่นปนอยู่ก็ห้ามเอามาตอบแทน:
+    - ถาม "ที่ไหน / อยู่ที่ไหน / ที่อยู่" → ตอบ **สถานที่/ที่อยู่** เท่านั้น (ห้ามตอบทุนจดทะเบียน ปีก่อตั้ง หรือข้อมูลบริษัทอื่น)
+    - ถาม "เมื่อไหร่ / ปีไหน" → ตอบ **วัน/เวลา/ปี**
+    - ถาม "เท่าไหร่ / กี่บาท" → ตอบ **จำนวน/ตัวเลข**
+    - ถาม "เบอร์ / โทร" → ตอบ **เบอร์โทรศัพท์**
+    ถ้า CONTEXT ไม่มีข้อมูลที่ตรงประเภทคำถาม → ตอบ "ขณะนี้ยังไม่มีข้อมูลส่วนนี้ครับ"
 
 CONTEXT:
 {context}
@@ -702,6 +737,12 @@ QUESTION: {question}"""
         messages.extend(history)   # previous user/assistant turns
         messages.append({"role": "user", "content": current_prompt})
 
+        # Answer generation backend is configurable (see ANSWER_LLM_USE_LOCAL):
+        #   - cloud chat_llm + OLLAMA_CHAT_MODEL    → fast, default
+        #   - local_llm (llm-server) + ANSWER_LLM_MODEL → slower but follows
+        #     question-type rules more reliably (e.g. address vs capital).
+        if settings.ANSWER_LLM_USE_LOCAL:
+            return await local_llm.chat(messages, model=settings.ANSWER_LLM_MODEL)
         return await chat_llm.chat(messages, model=settings.OLLAMA_CHAT_MODEL)
 
     async def _save_unanswered_question(
