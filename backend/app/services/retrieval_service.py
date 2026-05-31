@@ -1,10 +1,28 @@
 import logging
+import math
 from app.core.config import settings
 from app.core.text import normalize_question, sha256_text
 from app.services.ollama_client import embed_llm, local_llm
 from app.db.supabase_client import supabase
 
 logger = logging.getLogger(__name__)
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two equal-length vectors. Returns 0.0 if degenerate."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+# Minimum embedding similarity between the user question and the LLM-selected
+# canonical question. The Qwen2.5 matcher can occasionally pick a loosely
+# related entry (e.g. claim-document Q&A for an unrelated query); this gate
+# rejects those so the request falls through to full RAG instead.
+CANONICAL_VERIFY_MIN_SIM = 0.80
 
 
 class RetrievalService:
@@ -62,6 +80,12 @@ class RetrievalService:
             logger.debug("canonical_qa_no_text_candidates | q=%r", question[:80])
             return None
 
+        # Stable ordering (priority desc, then id) so the LLM's numeric pick maps
+        # to a deterministic candidate. Without this, candidates accumulate in
+        # non-deterministic Postgres order and the same query can match different
+        # entries on repeated calls.
+        candidates.sort(key=lambda r: (-(r.get("priority") or 0), str(r.get("id"))))
+
         # Trim to max candidates
         candidates = candidates[: settings.CANONICAL_QA_MAX_CANDIDATES]
 
@@ -88,10 +112,32 @@ class RetrievalService:
                 idx = int(token) - 1
                 if 0 <= idx < len(candidates):
                     matched = candidates[idx]
-                    matched["similarity"] = 1.0   # LLM match → treat as exact
+
+                    # ── Verification gate ────────────────────────────────────
+                    # Confirm the LLM-picked canonical question is actually
+                    # semantically close via embedding similarity. Rejects loose
+                    # matches (e.g. claim-document Q&A picked for an unrelated
+                    # query) so the request falls through to full RAG.
+                    try:
+                        q_emb  = await embed_llm.embed(normalize_question(question))
+                        c_emb  = await embed_llm.embed(normalize_question(matched["question"]))
+                        sim    = _cosine(q_emb, c_emb)
+                    except Exception as e:
+                        logger.warning("canonical_qa_verify_error | err=%s", e)
+                        sim = 0.0
+
+                    if sim < CANONICAL_VERIFY_MIN_SIM:
+                        logger.info(
+                            "canonical_qa_rejected_low_sim | sim=%.3f < %.2f | q=%r | canonical=%r",
+                            sim, CANONICAL_VERIFY_MIN_SIM,
+                            question[:60], matched.get("question", "")[:60],
+                        )
+                        return None
+
+                    matched["similarity"] = 1.0   # verified match → treat as exact
                     logger.info(
-                        "canonical_qa_llm_matched | q=%r | canonical=%r",
-                        question[:80], matched.get("question", "")[:80],
+                        "canonical_qa_llm_matched | sim=%.3f | q=%r | canonical=%r",
+                        sim, question[:80], matched.get("question", "")[:80],
                     )
                     return matched
             logger.debug(
@@ -190,12 +236,46 @@ class RetrievalService:
         if settings.ENABLE_RERANKER and rows:
             rows = self._rerank(question, rows)
 
+        # ── De-duplicate near-identical content ───────────────────────────
+        # The KB ingests the same boilerplate (nav/footer, shared page blocks)
+        # under several URLs/titles. Those duplicates score the same similarity
+        # and crowd out genuinely distinct chunks, hurting context precision.
+        # Keep only the first (highest-similarity) copy of each content block.
+        before = len(rows)
+        rows = self._dedupe_by_content(rows)
+        deduped = before - len(rows)
+
         result = rows[: settings.RERANK_TOP_K]
+        if deduped:
+            logger.debug("search_context_dedup | removed=%d duplicate chunks", deduped)
         logger.info(
             "search_context | company=%s | total_rows=%d | returned=%d | reranker=%s | q=%r",
             company_code, len(rows), len(result), settings.ENABLE_RERANKER, question[:60],
         )
         return result
+
+    @staticmethod
+    def _dedupe_by_content(rows: list[dict]) -> list[dict]:
+        """Drop rows whose content duplicates an already-kept row.
+
+        Fingerprints the first 200 non-space characters of each chunk's text.
+        The same boilerplate ingested under different URLs/titles collapses to
+        one entry; the first occurrence (highest similarity, list is pre-sorted)
+        is kept. Rows without content are always kept.
+        """
+        seen: set[str] = set()
+        out: list[dict] = []
+        for r in rows:
+            content = (r.get("content_markdown") or r.get("content") or r.get("answer") or "")
+            key = "".join(content.split())[:200]
+            if not key:
+                out.append(r)
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(r)
+        return out
 
     @staticmethod
     def _rerank(question: str, rows: list[dict]) -> list[dict]:
