@@ -9,6 +9,7 @@ from app.schemas.chat import ChatResponse, ChatSource, SourceRef
 from app.services.ollama_client import chat_llm, embed_llm, local_llm
 from app.services.retrieval_service import retrieval_service
 from app.services.bot_settings_service import bot_settings_service
+from app.services.provider_service import provider_service, AllProvidersFailedError
 
 logger = logging.getLogger(__name__)
 
@@ -745,8 +746,12 @@ QUESTION: {question}"""
         # check is a cheap deterministic string test; the extra LLM call only
         # fires on a detected mismatch (rare), so average latency is unaffected.
         qtype = self._detect_question_type(question)
+        # The retry is only worth it on the fast cloud model — on the slow local
+        # llm-server it would roughly double latency (risking timeouts) for a
+        # case those models rarely hit (they already follow question-type rules).
         if (
             qtype
+            and not settings.ANSWER_LLM_USE_LOCAL
             and not self._is_no_answer_text(answer)
             and not self._answer_matches_type(answer, qtype)
         ):
@@ -775,7 +780,20 @@ QUESTION: {question}"""
         return answer
 
     async def _call_answer_llm(self, messages: list[dict]) -> str:
-        """Call the configured answer-generation LLM (cloud or llm-server)."""
+        """Call the answer-generation LLM.
+
+        Priority: DB-configured multi-provider failover router (ProviderService)
+        → falls back to the .env client (llm-server or cloud) if no provider is
+        configured for the 'answer_llm' role or every provider fails.
+        """
+        if provider_service.is_configured("answer_llm"):
+            try:
+                return await provider_service.chat(
+                    "answer_llm", messages, temperature=settings.TEMPERATURE,
+                )
+            except AllProvidersFailedError as exc:
+                logger.warning("answer_llm_providers_failed | falling back to .env | %s", exc)
+
         if settings.ANSWER_LLM_USE_LOCAL:
             return await local_llm.chat(messages, model=settings.ANSWER_LLM_MODEL)
         return await chat_llm.chat(messages, model=settings.OLLAMA_CHAT_MODEL)

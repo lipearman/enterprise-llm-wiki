@@ -40,6 +40,7 @@ sys.path.insert(0, str(BACKEND_ROOT))
 
 # ── Now import backend modules ────────────────────────────────────────────────
 from app.core.config import settings                          # noqa: E402
+from app.db.supabase_client import supabase                   # noqa: E402
 from app.services.retrieval_service import retrieval_service  # noqa: E402
 from app.services.chat_service import chat_service            # noqa: E402
 from app.services.ollama_client import OllamaClient           # noqa: E402
@@ -139,7 +140,8 @@ def build_dataset(samples: list[dict]):
 
 # ── Step 3: configure metrics with our own Ollama LLM ────────────────────────
 
-def build_metrics(samples: list[dict], llm_base_url: str | None = None, llm_model: str | None = None):
+def build_metrics(samples: list[dict], judge_base_url: str | None = None,
+                  judge_model: str | None = None, judge_key: str | None = None):
     import warnings
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -149,15 +151,26 @@ def build_metrics(samples: list[dict], llm_base_url: str | None = None, llm_mode
     from langchain_openai import ChatOpenAI
     from langchain_community.embeddings import OllamaEmbeddings
 
-    judge_base  = llm_base_url or settings.OLLAMA_BASE_URL
-    judge_model = llm_model    or settings.OLLAMA_CHAT_MODEL
-    judge_key   = "ollama" if llm_base_url else (settings.OLLAMA_API_KEY or "ollama")
+    # An OpenAI-compatible judge. By default the local/cloud Ollama; override with
+    # --judge-base-url/--judge-model/--judge-key to use a fast, reliable provider
+    # (e.g. cerebras gpt-oss-120b) so the LLM-judge metrics don't time out.
+    judge_base  = judge_base_url or settings.OLLAMA_BASE_URL
+    base_v1     = judge_base if judge_base.rstrip("/").endswith("/v1") else f"{judge_base.rstrip('/')}/v1"
+    judge_mdl   = judge_model or settings.OLLAMA_CHAT_MODEL
+    judge_api   = judge_key or (settings.OLLAMA_API_KEY or "ollama")
+    print(f"  Judge → {base_v1}  model={judge_mdl}")
 
+    # gpt-oss reasoning models can spend the whole budget "thinking" and time
+    # out on judge prompts — force low reasoning effort to keep them snappy.
+    extra_body = {"reasoning_effort": "low"} if "gpt-oss" in judge_mdl.lower() else {}
     chat_lc = ChatOpenAI(
-        base_url=f"{judge_base}/v1",
-        api_key=judge_key,
-        model=judge_model,
+        base_url=base_v1,
+        api_key=judge_api,
+        model=judge_mdl,
         temperature=0,
+        timeout=90,
+        max_retries=4,
+        extra_body=extra_body,
     )
     # Local Ollama for embeddings (Answer Relevancy uses cosine similarity)
     embed_lc = OllamaEmbeddings(
@@ -172,6 +185,12 @@ def build_metrics(samples: list[dict], llm_base_url: str | None = None, llm_mode
     answer_relevancy.llm        = llm
     answer_relevancy.embeddings = emb
     context_precision.llm   = llm
+
+    # answer_relevancy generates `strictness` questions in ONE call via the
+    # OpenAI `n` param. Many providers (cerebras, sambanova, …) reject n>1, so
+    # force n=1 — slightly noisier relevancy but compatible with every provider.
+    if hasattr(answer_relevancy, "strictness"):
+        answer_relevancy.strictness = 1
 
     metrics = [faithfulness, answer_relevancy, context_precision]
 
@@ -287,10 +306,31 @@ def main() -> None:
     parser.add_argument("--limit",   type=int, default=None,
                         help="Limit number of questions (useful for quick tests)")
     parser.add_argument("--llm-base-url", default=None,
-                        help="Override LLM base URL, e.g. http://localhost:11434")
+                        help="Override the ANSWER-generation LLM base URL, e.g. http://localhost:11434")
     parser.add_argument("--llm-model", default=None,
-                        help="Override LLM model name, e.g. llama3.2:latest")
+                        help="Override the ANSWER-generation LLM model name")
+    parser.add_argument("--judge-base-url", default=None,
+                        help="Override the Ragas JUDGE base URL, e.g. https://api.cerebras.ai/v1")
+    parser.add_argument("--judge-model", default=None,
+                        help="Override the Ragas JUDGE model, e.g. gpt-oss-120b")
+    parser.add_argument("--judge-key", default=None,
+                        help="API key for the JUDGE provider (needed for cloud judges)")
+    parser.add_argument("--judge-provider", default=None,
+                        help="Use a provider from the DB as judge by name (e.g. cerebras); "
+                             "pulls base_url+key automatically. Combine with --judge-model.")
+    parser.add_argument("--max-workers", type=int, default=2,
+                        help="Parallel judge calls. Use 1 for rate-limited cloud judges.")
     args = parser.parse_args()
+
+    # Resolve --judge-provider (DB lookup) into base_url/key
+    if args.judge_provider:
+        row = (supabase.table("ai_providers").select("*")
+               .eq("name", args.judge_provider).single().execute().data)
+        if not row:
+            print(f"Judge provider '{args.judge_provider}' not found in ai_providers.")
+            sys.exit(1)
+        args.judge_base_url = args.judge_base_url or row["base_url"]
+        args.judge_key      = args.judge_key or row["api_key"]
 
     # Patch LLM if local override requested
     if args.llm_base_url or args.llm_model:
@@ -328,11 +368,16 @@ def main() -> None:
     from ragas import evaluate, RunConfig
 
     dataset    = build_dataset(samples)
-    metrics    = build_metrics(samples, llm_base_url=args.llm_base_url, llm_model=args.llm_model)
+    metrics    = build_metrics(
+        samples,
+        judge_base_url=args.judge_base_url,
+        judge_model=args.judge_model,
+        judge_key=args.judge_key,
+    )
     run_config = RunConfig(
-        max_workers=2,    # limit parallel LLM calls → avoid 429 rate-limit
-        timeout=120,      # seconds per job
-        max_retries=2,
+        max_workers=args.max_workers,  # 1 = sequential → avoids cloud 429 bursts
+        timeout=120,                   # seconds per job
+        max_retries=3,
     )
     result = evaluate(dataset=dataset, metrics=metrics, run_config=run_config)
 

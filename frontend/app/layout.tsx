@@ -20,6 +20,7 @@ const NAV_ITEMS = [
   { href: "/unanswered",  label: "📭 Missed Q",     exact: false },
   { href: "/audit",       label: "📋 Audit",        exact: false },
   { href: "/eval",        label: "🧪 Eval",         exact: false },
+  { href: "/providers",   label: "🤖 Providers",    exact: false },
   { href: "/settings",    label: "🛠️ Settings",     exact: false },
 ];
 
