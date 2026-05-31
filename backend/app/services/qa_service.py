@@ -1,8 +1,12 @@
 import json
+import logging
 from app.services.ollama_client import chat_llm, embed_llm
+from app.services.provider_service import provider_service, AllProvidersFailedError
 from app.core.config import settings
 from app.core.text import normalize_question
 from app.db.supabase_client import supabase
+
+logger = logging.getLogger(__name__)
 
 
 class QAService:
@@ -21,10 +25,11 @@ Rules:
 WIKI:
 {wiki_markdown[:12000]}
 """
-        raw = await chat_llm.chat([
+        messages = [
             {"role": "system", "content": "You generate canonical QA from wiki pages. Return JSON only."},
             {"role": "user", "content": prompt},
-        ], model=settings.QA_GENERATION_MODEL)
+        ]
+        raw = await self._complete(messages)
         qa_items = self._parse_json_array(raw)
         saved = []
         for item in qa_items:
@@ -44,6 +49,18 @@ WIKI:
             res = supabase.table("canonical_qa").insert(row).execute()
             saved.append(res.data[0] if res.data else row)
         return saved
+
+    @staticmethod
+    async def _complete(messages: list[dict]) -> str:
+        """Run via the provider failover chain (role=canonical_qa), falling back
+        to the .env chat_llm + QA_GENERATION_MODEL when unconfigured or every
+        provider fails."""
+        if provider_service.is_configured("canonical_qa"):
+            try:
+                return await provider_service.chat("canonical_qa", messages, max_tokens=4096)
+            except AllProvidersFailedError as exc:
+                logger.warning("canonical_qa_providers_failed | falling back to .env | %s", exc)
+        return await chat_llm.chat(messages, model=settings.QA_GENERATION_MODEL)
 
     def _parse_json_array(self, raw: str) -> list[dict]:
         raw = raw.strip()

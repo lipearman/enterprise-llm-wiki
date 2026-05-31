@@ -16,11 +16,13 @@ callers fall back to their existing default client.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import httpx
 
 from app.db.supabase_client import supabase
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -166,31 +168,71 @@ class ProviderService:
             # Reasoning models (gpt-oss) return {choices:[{message:{content, reasoning}}]}
             return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
 
-    # ── Embeddings with failover ──────────────────────────────────────────────
+    # ── Embeddings (single provider + transient retry) ─────────────────────────
+    _EMBED_RETRIES = 3          # attempts per provider on transient errors
+    _EMBED_BACKOFF = 1.5        # seconds, exponential
+
     async def embed(self, role: str, text: str) -> list[float]:
+        """Embed via the role's provider(s).
+
+        Unlike chat, embedding does NOT fail over to a *different* model — each
+        model has its own vector space, so a fallback embedder would corrupt
+        retrieval. The ``embed`` role is restricted to one provider; on a
+        transient rate-limit (429/5xx/timeout) we retry the same provider with
+        exponential backoff instead of switching."""
         self._ensure_loaded()
         chain = self._by_role.get(role, [])
         if not chain:
             raise AllProvidersFailedError(f"no active provider for role={role}")
+        # Match the DB vector column width. Dimension-capable providers (Gemini
+        # gemini-embedding-001, OpenAI text-embedding-3) honour this; others
+        # ignore it and return their native size.
+        dims = settings.EMBEDDING_DIM or None
         last_exc: Exception | None = None
         for a in chain:
             prov = a["_provider"]
-            try:
-                return await self._openai_embed(prov["base_url"], prov["api_key"], a["model"], text)
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("provider_embed_failover | provider=%s | %s",
-                               prov.get("name"), str(exc)[:100])
-                continue
-        raise AllProvidersFailedError(f"all embed providers failed: {last_exc}") from last_exc
+            for attempt in range(self._EMBED_RETRIES):
+                try:
+                    return await self._openai_embed(prov["base_url"], prov["api_key"], a["model"], text, dims)
+                except httpx.HTTPStatusError as exc:
+                    last_exc = exc
+                    status = exc.response.status_code if exc.response is not None else None
+                    if status in _FAILOVER_STATUS and attempt < self._EMBED_RETRIES - 1:
+                        delay = self._EMBED_BACKOFF * (2 ** attempt)
+                        logger.warning("provider_embed_retry | provider=%s | status=%s | retry in %.1fs",
+                                       prov.get("name"), status, delay)
+                        await asyncio.sleep(delay)
+                        continue
+                    break
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    last_exc = exc
+                    if attempt < self._EMBED_RETRIES - 1:
+                        delay = self._EMBED_BACKOFF * (2 ** attempt)
+                        await asyncio.sleep(delay)
+                        continue
+                    break
+                except Exception as exc:           # non-transient → don't retry
+                    last_exc = exc
+                    break
+            # Only reached when this provider exhausted its retries. The embed
+            # role normally has a single provider, so we stop here rather than
+            # fail over to a different (incompatible) model.
+            logger.warning("provider_embed_failed | provider=%s | %s",
+                           prov.get("name"), str(last_exc)[:120])
+            break
+        raise AllProvidersFailedError(f"embed failed for role={role}: {last_exc}") from last_exc
 
     @staticmethod
-    async def _openai_embed(base_url: str, api_key: str, model: str, text: str) -> list[float]:
+    async def _openai_embed(base_url: str, api_key: str, model: str, text: str,
+                            dimensions: int | None = None) -> list[float]:
         url = base_url.rstrip("/") + "/embeddings"
+        payload: dict = {"model": model, "input": text}
+        if dimensions:
+            payload["dimensions"] = dimensions
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(
                 url,
-                json={"model": model, "input": text},
+                json=payload,
                 headers={"Authorization": f"Bearer {api_key}"},
             )
             if r.status_code in _FAILOVER_STATUS:

@@ -27,7 +27,8 @@ from app.core.text import normalize_question
 
 
 BATCH = 20        # rows per Supabase upsert batch
-SLEEP = 0.05      # seconds between embedding calls (rate-limit safety)
+SLEEP = 0.05      # seconds between embedding calls (override via --sleep for
+                  # rate-limited cloud embedders, e.g. 0.7 for Gemini free tier)
 # mxbai-embed-large on this server crashes above ~1020 ASCII chars.
 # 1500 chars is used here; content is mostly Thai so effective token count
 # stays well within the 512-token window.
@@ -116,8 +117,16 @@ async def clear_answer_cache() -> None:
 
 async def main(force: bool) -> None:
     t0 = time.time()
-    print(f"Re-embedding with model: {settings.OLLAMA_EMBED_MODEL}  dim={settings.EMBEDDING_DIM}")
-    print(f"Embed server: {settings.OLLAMA_EMBED_BASE_URL}")
+    # Report the ACTUAL embedder: the DB-backed provider role takes precedence
+    # over the .env Ollama model (see EmbeddingRouter in ollama_client).
+    from app.services.provider_service import provider_service
+    if provider_service.is_configured("embed"):
+        chain = provider_service._by_role.get("embed", [])
+        models = [f"{a['_provider']['name']}/{a['model']}" for a in chain]
+        print(f"Re-embedding via provider role 'embed': {models}  dim={settings.EMBEDDING_DIM}")
+    else:
+        print(f"Re-embedding with model: {settings.OLLAMA_EMBED_MODEL}  dim={settings.EMBEDDING_DIM}")
+        print(f"Embed server: {settings.OLLAMA_EMBED_BASE_URL}")
 
     # Quick smoke test
     test_emb = await embed_llm.embed("test")
@@ -140,5 +149,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Re-embed all content with current embed model")
     parser.add_argument("--force", action="store_true",
                         help="Re-embed ALL rows, not just those with NULL embedding")
+    parser.add_argument("--sleep", type=float, default=SLEEP,
+                        help=f"Seconds between embedding calls (default {SLEEP}; use ~0.7 for Gemini free tier)")
     args = parser.parse_args()
+    SLEEP = args.sleep
     asyncio.run(main(args.force))

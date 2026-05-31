@@ -90,6 +90,7 @@ export default function ProvidersPage() {
   const [providers, setProviders]   = useState<Provider[]>([]);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [roles, setRoles]           = useState<string[]>([]);
+  const [embeddingDim, setEmbeddingDim] = useState<number | null>(null);
   const [loading, setLoading]       = useState(true);
   const [modal, setModal]           = useState<{ open: boolean; provider: Provider | null }>({ open: false, provider: null });
   const [testResult, setTestResult] = useState<Record<string, string>>({});
@@ -110,27 +111,32 @@ export default function ProvidersPage() {
     if (cardModels[providerId] || cardLoading[providerId]) return;
     setCardLoading(s => ({ ...s, [providerId]: true }));
     try {
-      const r = await apiFetch(`/api/providers/${providerId}/models?free_only=true`).then(r => r.json());
+      // card test sends a chat completion → only chat-capable models
+      const r = await apiFetch(`/api/providers/${providerId}/models?free_only=true&kind=chat`).then(r => r.json());
       setCardModels(s => ({ ...s, [providerId]: r.ok ? (r.items ?? []) : [] }));
     } catch { setCardModels(s => ({ ...s, [providerId]: [] })); }
     finally { setCardLoading(s => ({ ...s, [providerId]: false })); }
   }, [cardModels, cardLoading]);
 
-  const fetchModels = useCallback(async (providerId: string, free: boolean) => {
+  const fetchModels = useCallback(async (providerId: string, free: boolean, kind: string) => {
     if (!providerId) { setModelOpts([]); return; }
     setModelLoading(true); setModelErr(null);
     try {
-      const r = await apiFetch(`/api/providers/${providerId}/models?free_only=${free}`).then(r => r.json());
+      const r = await apiFetch(`/api/providers/${providerId}/models?free_only=${free}&kind=${kind}`).then(r => r.json());
       if (r.ok) setModelOpts(r.items ?? []);
       else { setModelOpts([]); setModelErr(r.detail ?? `HTTP ${r.status}`); }
     } catch (e) { setModelOpts([]); setModelErr((e as Error).message); }
     finally { setModelLoading(false); }
   }, []);
 
-  // refetch model list whenever the chosen provider or free-toggle changes
+  // refetch model list whenever the chosen provider or free-toggle changes.
+  // The "embed" role lists embedding models only; every other role lists chat models.
   useEffect(() => {
-    if (addRow?.provider_id) fetchModels(addRow.provider_id, freeOnly);
-  }, [addRow?.provider_id, freeOnly, fetchModels]);
+    if (addRow?.provider_id) {
+      const kind = addRow.role === "embed" ? "embed" : "chat";
+      fetchModels(addRow.provider_id, freeOnly, kind);
+    }
+  }, [addRow?.provider_id, addRow?.role, freeOnly, fetchModels]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -142,6 +148,7 @@ export default function ProvidersPage() {
       setProviders(p.items ?? []);
       setRoles(p.roles ?? []);
       setAssignments(a.items ?? []);
+      setEmbeddingDim(a.embedding_dim ?? null);
     } finally { setLoading(false); }
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -256,12 +263,25 @@ export default function ProvidersPage() {
         <div className="space-y-3">
           {roles.map(role => {
             const rows = assignments.filter(a => a.role === role).sort((x, y) => x.priority - y.priority);
+            const isSingle = role === "embed";                 // one provider only (vector-space safety)
+            const canAdd = !isSingle || rows.length === 0;     // embed: hide add once one exists
             return (
               <div key={role} className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">{ROLE_LABELS[role] ?? role}</span>
-                  <button onClick={() => { setCustomModel(false); setModelOpts([]); setAddRow({ role, provider_id: providers[0]?.id ?? "", model: "" }); }}
-                    className="text-xs text-indigo-600 hover:underline flex items-center gap-1"><Plus size={11} /> เพิ่ม</button>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">{ROLE_LABELS[role] ?? role}</span>
+                    {isSingle && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400">provider เดียว</span>}
+                    {role === "embed" && embeddingDim != null && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-400 font-mono"
+                            title="ขนาด vector (ผูกกับคอลัมน์ vector ใน DB — เปลี่ยนต้อง ALTER + re-embed)">
+                        {embeddingDim} dims
+                      </span>
+                    )}
+                  </div>
+                  {canAdd && (
+                    <button onClick={() => { setCustomModel(false); setModelOpts([]); setAddRow({ role, provider_id: providers[0]?.id ?? "", model: "" }); }}
+                      className="text-xs text-indigo-600 hover:underline flex items-center gap-1"><Plus size={11} /> เพิ่ม</button>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   {rows.map((a, i) => (
@@ -270,8 +290,12 @@ export default function ProvidersPage() {
                       <span className="font-medium text-slate-700 dark:text-slate-200 w-24 truncate">{a.provider_name}</span>
                       <span className="font-mono text-xs text-slate-500 flex-1 truncate">{a.model}</span>
                       <span className={`w-2 h-2 rounded-full ${a.is_active ? "bg-emerald-500" : "bg-slate-400"}`} />
-                      <button onClick={() => reorder(a, -1)} disabled={i === 0} className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-30"><ArrowUp size={12} /></button>
-                      <button onClick={() => reorder(a, 1)} disabled={i === rows.length - 1} className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-30"><ArrowDown size={12} /></button>
+                      {!isSingle && (
+                        <>
+                          <button onClick={() => reorder(a, -1)} disabled={i === 0} className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-30"><ArrowUp size={12} /></button>
+                          <button onClick={() => reorder(a, 1)} disabled={i === rows.length - 1} className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-30"><ArrowDown size={12} /></button>
+                        </>
+                      )}
                       <button onClick={() => updateAssignment(a, { is_active: !a.is_active })} className="p-1 text-slate-400 hover:text-slate-700"><Check size={12} /></button>
                       <button onClick={() => delAssignment(a.id)} className="p-1 text-red-400 hover:text-red-600"><Trash2 size={12} /></button>
                     </div>
@@ -309,7 +333,7 @@ export default function ProvidersPage() {
                         <label className="flex items-center gap-1 cursor-pointer">
                           <input type="checkbox" checked={customModel} onChange={e => { setCustomModel(e.target.checked); setAddRow({ ...addRow, model: "" }); }} /> พิมพ์เอง
                         </label>
-                        <button onClick={() => fetchModels(addRow.provider_id, freeOnly)}
+                        <button onClick={() => fetchModels(addRow.provider_id, freeOnly, addRow.role === "embed" ? "embed" : "chat")}
                           className="flex items-center gap-1 text-indigo-600 hover:underline">
                           <RefreshCw size={11} className={modelLoading ? "animate-spin" : ""} /> โหลด model ใหม่
                         </button>

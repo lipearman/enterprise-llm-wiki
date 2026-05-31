@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from app.db.supabase_client import supabase
 from app.services.provider_service import provider_service, mask_key, ROLES
 from app.services.audit_service import audit_log
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -136,35 +137,65 @@ def _fetch_models(prov: dict) -> tuple[list[dict], dict]:
     return (data if isinstance(data, list) else []), {}
 
 
-def _normalize_models(raw: list[dict], free_only: bool) -> list[dict]:
-    """Mark each model free/paid. If the provider exposes NO explicitly-free
-    model (a flat free-tier dev provider like sambanova/nvidia/cerebras/ollama),
-    treat every model as free so free_only doesn't empty the list."""
+# Substrings that mark a model as an embedding model, or as a clearly
+# non-chat model (so chat roles don't offer TTS / audio / image / guard / …).
+_EMBED_HINTS = ("embed", "embedding")
+_NON_CHAT_HINTS = (
+    "embed", "embedding", "tts", "whisper", "audio", "speech", "image", "imagen",
+    "guard", "rerank", "reranker", "moderation", "aqa", "veo", "lyria", "orpheus",
+)
+
+
+def _classify_model(mid: str) -> str:
+    """'embed' | 'chat' — best-effort classification from the model id."""
+    low = mid.lower()
+    if any(h in low for h in _EMBED_HINTS):
+        return "embed"
+    return "chat"
+
+
+def _normalize_models(raw: list[dict], free_only: bool, kind: str = "all") -> list[dict]:
+    """Mark each model free/paid and (optionally) filter by kind.
+
+    If the provider exposes NO explicitly-free model (a flat free-tier dev
+    provider like sambanova/nvidia/cerebras/ollama), treat every model as free
+    so free_only doesn't empty the list.
+
+    kind: 'embed' → embedding models only; 'chat' → exclude embedding & other
+    non-chat (tts/audio/image/guard/…); 'all' → no kind filter."""
     valid = [m for m in raw if isinstance(m, dict) and m.get("id")]
     has_free_marker = any(_model_is_free(m) for m in valid)
     items = []
     for m in valid:
+        mid = m["id"]
+        low = mid.lower()
+        if kind == "embed" and _classify_model(mid) != "embed":
+            continue
+        if kind == "chat" and any(h in low for h in _NON_CHAT_HINTS):
+            continue
         free = _model_is_free(m) if has_free_marker else True
         if free_only and not free:
             continue
-        items.append({"id": m["id"], "name": m.get("name") or m["id"], "free": free})
+        items.append({"id": mid, "name": m.get("name") or mid, "free": free})
     items.sort(key=lambda x: x["id"].lower())
     return items
 
 
 @router.get("/{provider_id}/models")
-async def list_provider_models(provider_id: str, free_only: bool = True):
+async def list_provider_models(provider_id: str, free_only: bool = True, kind: str = "all"):
     """List models the provider exposes via GET {base_url}/models.
 
     free_only=true (default) keeps only free models. Providers with no explicit
-    free/paid split are treated as entirely free."""
+    free/paid split are treated as entirely free.
+    kind: 'embed' (embedding models only), 'chat' (exclude embed/tts/audio/…),
+    or 'all' (default, no kind filter)."""
     res = supabase.table("ai_providers").select("*").eq("id", provider_id).single().execute()
     prov = res.data
     if not prov:
         raise HTTPException(404, "Provider not found")
     try:
         raw, _ = _fetch_models(prov)
-        items = _normalize_models(raw, free_only)
+        items = _normalize_models(raw, free_only, kind)
         return {"ok": True, "items": items, "total": len(items)}
     except httpx.HTTPStatusError as exc:
         return {"ok": False, "status": exc.response.status_code, "detail": exc.response.text[:200], "items": []}
@@ -217,6 +248,12 @@ async def test_provider(provider_id: str, model: str | None = None):
 
 # ── Role assignments ───────────────────────────────────────────────────────────
 
+# Roles that accept exactly ONE provider. Embedding failover across different
+# models is unsafe — each model has its own vector space, so a fallback embedder
+# would silently corrupt retrieval (query vs stored docs in different spaces).
+_SINGLE_ASSIGNMENT_ROLES = {"embed"}
+
+
 @router.get("/roles")
 def list_assignments():
     rows = (
@@ -226,13 +263,24 @@ def list_assignments():
     provs = {p["id"]: p["name"] for p in (supabase.table("ai_providers").select("id,name").execute().data or [])}
     for r in rows:
         r["provider_name"] = provs.get(r.get("provider_id"), "?")
-    return {"items": rows, "roles": list(ROLES)}
+    # embedding_dim is the fixed width of the DB vector columns — surfaced so the
+    # UI can display it on the Embeddings role (read-only).
+    return {"items": rows, "roles": list(ROLES), "embedding_dim": settings.EMBEDDING_DIM}
 
 
 @router.post("/roles")
 def create_assignment(body: AssignmentIn, request: Request):
     if body.role not in ROLES:
         raise HTTPException(400, f"unknown role; allowed: {list(ROLES)}")
+    if body.role in _SINGLE_ASSIGNMENT_ROLES:
+        existing = (supabase.table("ai_role_assignments").select("id")
+                    .eq("role", body.role).execute().data or [])
+        if existing:
+            raise HTTPException(
+                409,
+                f"role '{body.role}' accepts only one provider (embedding failover "
+                "across models would corrupt retrieval). Remove the existing one first.",
+            )
     res = supabase.table("ai_role_assignments").insert({
         "role": body.role, "provider_id": body.provider_id, "model": body.model,
         "priority": body.priority, "is_active": body.is_active,

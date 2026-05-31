@@ -7,22 +7,47 @@ import { useState, useEffect } from "react";
 import { getToken, clearToken } from "@/lib/api";
 import { ThemeProvider } from "next-themes";
 import { useTheme } from "next-themes";
-import { Brain, Moon, Sun, LogOut, Menu, X } from "lucide-react";
+import { Brain, Moon, Sun, LogOut, Menu, X, ChevronDown } from "lucide-react";
 import FloatingChat from "@/components/FloatingChat";
 
-const NAV_ITEMS = [
-  { href: "/chat",        label: "💬 Chat",        exact: true  },
-  { href: "/wiki",        label: "📖 Wiki",         exact: false },
-  { href: "/qa",          label: "❓ QA Editor",    exact: false },
-  { href: "/sources",     label: "🔗 Sources",      exact: false },
-  { href: "/jobs",        label: "⚙️ Jobs",         exact: false },
-  { href: "/graph",       label: "🕸️ Graph",        exact: false },
-  { href: "/unanswered",  label: "📭 Missed Q",     exact: false },
-  { href: "/audit",       label: "📋 Audit",        exact: false },
-  { href: "/eval",        label: "🧪 Eval",         exact: false },
-  { href: "/providers",   label: "🤖 Providers",    exact: false },
-  { href: "/settings",    label: "🛠️ Settings",     exact: false },
+// ── Navigation (grouped into dropdown categories) ───────────────────────────────
+type NavLink = { href: string; label: string; exact?: boolean };
+type NavNode = NavLink | { label: string; children: NavLink[] };
+
+const NAV: NavNode[] = [
+  { href: "/chat", label: "💬 Chat", exact: true },
+  {
+    label: "📚 ความรู้",
+    children: [
+      { href: "/wiki",    label: "📖 Wiki" },
+      { href: "/qa",      label: "❓ QA Editor" },
+      { href: "/sources", label: "🔗 Sources" },
+      { href: "/graph",   label: "🕸️ Knowledge Graph" },
+    ],
+  },
+  {
+    label: "🔧 ระบบงาน",
+    children: [
+      { href: "/jobs",       label: "⚙️ Jobs" },
+      { href: "/unanswered", label: "📭 Missed Questions" },
+      { href: "/audit",      label: "📋 Audit Log" },
+    ],
+  },
+  {
+    label: "🤖 AI",
+    children: [
+      { href: "/providers", label: "🤖 Providers" },
+      { href: "/eval",      label: "🧪 Evaluation" },
+    ],
+  },
+  { href: "/settings", label: "🛠️ Settings" },
 ];
+
+const isNavLink = (n: NavNode): n is NavLink => "href" in n;
+
+function isLinkActive(pathname: string, href: string, exact?: boolean): boolean {
+  return exact ? pathname === href : pathname.startsWith(href) && href !== "/";
+}
 
 // ── Theme toggle (used inside NavBar — must render inside ThemeProvider) ──────
 function ThemeToggle() {
@@ -47,7 +72,11 @@ function ThemeToggle() {
 function NavBar() {
   const pathname = usePathname();
   const router   = useRouter();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(false);            // mobile menu
+  const [openMenu, setOpenMenu] = useState<string | null>(null);  // desktop dropdown
+
+  // Close menus whenever the route changes.
+  useEffect(() => { setOpen(false); setOpenMenu(null); }, [pathname]);
 
   function logout() {
     clearToken();
@@ -69,22 +98,64 @@ function NavBar() {
 
           {/* Desktop nav */}
           <div className="hidden md:flex items-center gap-0.5">
-            {NAV_ITEMS.map((item) => {
-              const active = item.exact
-                ? pathname === item.href
-                : pathname.startsWith(item.href) && item.href !== "/";
+            {NAV.map((node) => {
+              // ── Standalone link ──
+              if (isNavLink(node)) {
+                const active = isLinkActive(pathname, node.href, node.exact);
+                return (
+                  <Link
+                    key={node.href}
+                    href={node.href}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                      active ? "bg-indigo-600 text-white" : "text-slate-400 hover:bg-slate-800 hover:text-white"
+                    }`}
+                  >
+                    {node.label}
+                  </Link>
+                );
+              }
+              // ── Dropdown group ──
+              const groupActive = node.children.some((c) => isLinkActive(pathname, c.href));
+              const isOpen = openMenu === node.label;
               return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                    active
-                      ? "bg-indigo-600 text-white"
-                      : "text-slate-400 hover:bg-slate-800 hover:text-white"
-                  }`}
+                <div
+                  key={node.label}
+                  className="relative"
+                  onMouseEnter={() => setOpenMenu(node.label)}
+                  onMouseLeave={() => setOpenMenu(null)}
                 >
-                  {item.label}
-                </Link>
+                  <button
+                    onClick={() => setOpenMenu(isOpen ? null : node.label)}
+                    className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                      groupActive || isOpen
+                        ? "bg-indigo-600 text-white"
+                        : "text-slate-400 hover:bg-slate-800 hover:text-white"
+                    }`}
+                  >
+                    {node.label}
+                    <ChevronDown size={13} className={`transition-transform ${isOpen ? "rotate-180" : ""}`} />
+                  </button>
+                  {isOpen && (
+                    <div className="absolute left-0 top-full pt-1.5 z-50 min-w-[210px]">
+                      <div className="rounded-xl border border-slate-700/70 bg-slate-900 shadow-xl shadow-black/40 p-1">
+                        {node.children.map((c) => {
+                          const active = isLinkActive(pathname, c.href);
+                          return (
+                            <Link
+                              key={c.href}
+                              href={c.href}
+                              className={`block px-3 py-2 rounded-lg text-sm transition-colors ${
+                                active ? "bg-indigo-600 text-white" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                              }`}
+                            >
+                              {c.label}
+                            </Link>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -119,19 +190,48 @@ function NavBar() {
         {/* Mobile dropdown */}
         {open && (
           <div className="md:hidden pb-3 flex flex-col gap-0.5 border-t border-slate-800/80 mt-1 pt-2">
-            {NAV_ITEMS.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                onClick={() => setOpen(false)}
-                className="px-3 py-2.5 rounded-lg text-sm text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
-              >
-                {item.label}
-              </Link>
-            ))}
+            {NAV.map((node) => {
+              if (isNavLink(node)) {
+                const active = isLinkActive(pathname, node.href, node.exact);
+                return (
+                  <Link
+                    key={node.href}
+                    href={node.href}
+                    onClick={() => setOpen(false)}
+                    className={`px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                      active ? "bg-indigo-600 text-white" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                    }`}
+                  >
+                    {node.label}
+                  </Link>
+                );
+              }
+              return (
+                <div key={node.label} className="mt-1.5">
+                  <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    {node.label}
+                  </div>
+                  {node.children.map((c) => {
+                    const active = isLinkActive(pathname, c.href);
+                    return (
+                      <Link
+                        key={c.href}
+                        href={c.href}
+                        onClick={() => setOpen(false)}
+                        className={`block pl-6 pr-3 py-2.5 rounded-lg text-sm transition-colors ${
+                          active ? "bg-indigo-600 text-white" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                        }`}
+                      >
+                        {c.label}
+                      </Link>
+                    );
+                  })}
+                </div>
+              );
+            })}
             <button
               onClick={() => { setOpen(false); logout(); }}
-              className="text-left px-3 py-2.5 rounded-lg text-sm text-slate-400 hover:bg-slate-800 hover:text-white transition-colors flex items-center gap-1.5"
+              className="text-left px-3 py-2.5 mt-1.5 rounded-lg text-sm text-slate-400 hover:bg-slate-800 hover:text-white transition-colors flex items-center gap-1.5 border-t border-slate-800/80 pt-3"
             >
               <LogOut size={14} />
               ออกจากระบบ

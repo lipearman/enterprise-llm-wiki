@@ -29,6 +29,7 @@ Enterprise LLM Wiki เป็น **full-stack knowledge management platform** �
 | 🕷️ **Multi-Crawler Pipeline** | เลือก crawler backend ได้: Trafilatura · Playwright · crawl4ai — ต่อ request หรือ global |
 | 🔐 **API Key Authentication** | Middleware-based auth — Bearer token / X-API-Key header · Login page · auth guard |
 | 💬 **Floating Chat Widget** | Chatbot สาธารณะบนหน้า Landing — ตอบคำถามแบบ SSE streaming ไม่ต้องล็อกอิน |
+| 🔀 **Multi-Provider AI Failover** | กำหนด LLM/Embedding หลายเจ้าต่อ role ผ่าน UI · สลับอัตโนมัติเมื่อติด rate-limit · รองรับ Gemini ผ่าน OpenAI-compat |
 
 ---
 
@@ -70,12 +71,12 @@ Enterprise LLM Wiki เป็น **full-stack knowledge management platform** �
 └──────────────────────────┬─────────────────────────────────────────┘
                            │
 ┌──────────────────────────▼─────────────────────────────────────────┐
-│                         🤖 Ollama                                    │
-│  ☁️ Cloud (https://ollama.com)                                       │
-│     → Chat / Wiki / QA / Fact / Relationship Extraction             │
-│     → Model: gpt-oss:20b-cloud                                      │
-│  💻 Local (http://llm-server:11434)                                  │
-│     → Embeddings: mxbai-embed-large · 1024d                         │
+│           🔀 Provider Router (DB-backed, auto-failover)              │
+│  role → [provider chain by priority] · 429/error → next provider    │
+│  ☁️ cerebras · groq · sambanova · nvidia · openrouter · Gemini      │
+│     (OpenAI-compatible) → answer_llm / fact / wiki / qa             │
+│  🔢 embed → Gemini gemini-embedding-001 · 1024d (single provider)   │
+│  💻 .env / local fallback (Ollama cloud · typhoon @ llm-server)     │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -269,7 +270,97 @@ ANSWER_LLM_USE_LOCAL=false           # cloud (เร็ว, default)
 ANSWER_LLM_MODEL=qwen2.5:14b-instruct # ใช้เมื่อ USE_LOCAL=true
 ```
 
-> Ingestion models (Fact/Wiki/QA extraction) ใช้ cloud เสมอ — toggle นี้กระทบเฉพาะการ generate คำตอบ chat
+> Toggle นี้เป็น `.env` fallback — เมื่อมีการตั้ง provider chain (ด้านล่าง) ระบบจะใช้ provider ก่อน แล้วค่อย fallback มา `.env`/local
+
+---
+
+## 🔀 Multi-Provider AI Failover
+
+ระบบเรียก LLM/Embedding ผ่าน **provider router แบบ DB-backed** — กำหนด provider หลายเจ้าต่อ "role" ได้ และ **สลับอัตโนมัติเมื่อเจ้าหนึ่งติด rate-limit (429) / error / timeout** โดยไม่ต้องแก้ `.env` หรือ restart
+
+### แนวคิด: Role → ลำดับ Provider (failover chain)
+
+แต่ละ role ผูกกับลิสต์ provider เรียงตาม `priority` — เรียกตัวแรกก่อน ถ้าล้ม (429/5xx/timeout/empty content) ข้ามไปตัวถัดไปอัตโนมัติ:
+
+| Role | ใช้ตอน | ตัวอย่าง chain |
+|---|---|---|
+| `answer_llm` | สร้างคำตอบ chat | gemini-2.5-flash-lite → gemini-2.5-flash → groq llama-3.3-70b → *(typhoon local via .env)* |
+| `fact_extraction` | สกัด fact ตอน ingest | cerebras gpt-oss-120b → groq llama-3.3-70b → sambanova DeepSeek-V3.2 → openrouter |
+| `wiki_generation` | เขียนหน้า wiki | *(chain เดียวกับ fact)* |
+| `canonical_qa` | สร้าง Q&A pairs | *(chain เดียวกับ fact)* |
+| `embed` | ฝัง vector | gemini-embedding-001 *(เดี่ยว — ดูหัวข้อ Embeddings)* |
+
+- เก็บใน 2 ตาราง: **`ai_providers`** (base_url, api_key, protocol) + **`ai_role_assignments`** (role, provider, model, priority)
+- cache ในหน่วยความจำ TTL 30s · มี **`.env`/local fallback เสมอ** (เมื่อไม่ตั้ง role หรือทุกเจ้าล้ม)
+- จัดการผ่านหน้า **`/providers`** (เพิ่ม/ลบ/test, ลาก priority = ลำดับ failover, dropdown เลือก model)
+- API key ถูก **mask ทุก response** (`…xxxx`) — ไม่เคยส่ง full key กลับ frontend / log
+
+### Provider เป็น OpenAI-compatible (รวม Gemini)
+
+ทุก provider คุยผ่าน OpenAI protocol เดียว (`POST {base_url}/chat/completions`) — เพิ่มเจ้าใหม่ได้โดยไม่ต้องเขียน adapter:
+
+| Provider | base_url | หมายเหตุ |
+|---|---|---|
+| cerebras | `https://api.cerebras.ai/v1` | เร็วสุด (~0.5s) + rate-limit ใจดี |
+| groq | `https://api.groq.com/openai/v1` | llama-3.3-70b เร็ว |
+| sambanova | `https://api.sambanova.ai/v1` | DeepSeek-V3.2 / Llama |
+| nvidia | `https://integrate.api.nvidia.com/v1` | NIM (118 models) |
+| openrouter | `https://openrouter.ai/api/v1` | router 344 models (ฟรี 26) |
+| **Google AI Studio** | `https://generativelanguage.googleapis.com/v1beta/openai` | **Gemini ผ่าน OpenAI-compat layer** |
+
+> **เทคนิค Gemini:** Google มี OpenAI-compatibility endpoint (`/v1beta/openai`) ที่รับ `messages` แบบ OpenAI ตรงๆ → เสียบเข้า provider router ได้เลย **ไม่ต้องเขียน adapter** สำหรับ format `contents`/`parts` ของ Gemini เนทีฟ (`:generateContent`)
+
+### หน้า `/providers` — เลือก model อัตโนมัติ
+
+- ดึง `/models` ของแต่ละ provider มาทำ dropdown กรองได้ 2 มิติ:
+  - **`free_only`** — เฉพาะ model ฟรี (`:free` หรือ pricing 0; เจ้าที่ไม่มี free/paid split ถือว่าฟรีหมด)
+  - **`kind`** — `chat` (ตัด embed/tts/whisper/guard/image) หรือ `embed` (เฉพาะ embedding model)
+- ปุ่ม **test** ต่อ provider — auto-pick model เร็ว/เสถียร (preference list) หรือเลือกเองจาก dropdown
+
+### 🔢 Embeddings — Gemini migration (แก้ Thai vector collapse)
+
+เดิม `mxbai-embed-large` (1024d) **คืน vector เกือบเหมือนกันหมดสำหรับข้อความไทย** (cosine ≈ 1.0 แม้ข้อความไม่เกี่ยวกัน) → vector search ไทยแทบใช้ไม่ได้ ต้องพึ่ง text search ชดเชย
+
+เปลี่ยนเป็น **`gemini-embedding-001` @ 1024 dims** ผ่าน provider role `embed`:
+
+| Embedding | cos(ไทยเกี่ยวกัน) | cos(ไทยไม่เกี่ยว) | spread |
+|---|---|---|---|
+| mxbai-embed-large | ~1.0 | ~1.0 | **~0** ❌ |
+| **gemini-embedding-001** | 0.93 | 0.49 | **0.45** ✅ |
+
+เทคนิคที่เกี่ยวข้อง:
+- **`dimensions` param** — gemini default 3072 มิติ ต้องส่ง `dimensions=EMBEDDING_DIM` (1024) ให้ตรงคอลัมน์ `vector(1024)` ของ DB
+- **EmbeddingRouter** — หุ้ม `embed_llm` ที่จุดเดียว → ทุก caller (ingest/retrieval/wiki/qa/re-embed) สลับมา provider role `embed` พร้อมกัน
+- **single-provider เท่านั้น** — embed role ตั้งได้เจ้าเดียว (API ตอบ **409** ถ้าเพิ่มตัวที่ 2) เพราะคนละ model = คนละ vector space → fallback ข้าม model จะทำ retrieval พังแบบเงียบๆ
+- **retry/backoff** — แทน cross-model failover ด้วยการ retry provider เดิม 3 ครั้ง (exponential 1.5s→3s→6s) เมื่อ 429 ชั่วคราว
+- เปลี่ยนขนาด/model → ต้อง **re-embed ทั้งหมด** (`scripts/reembed_all.py --force --sleep 0.7`)
+
+> **กฎเหล็ก:** embedding failover ถูกต้องเฉพาะระหว่าง provider ที่รัน **model เดียวกัน** (vector space เดียวกัน) เท่านั้น — ต่างจาก chat ที่สลับ model ข้ามเจ้าได้
+
+---
+
+## 🧪 RAG Evaluation (Ragas)
+
+`eval/ragas_eval.py` วัดคุณภาพ RAG 5 ตัว: **Faithfulness · Answer Relevancy · Context Precision · Context Recall · Answer Correctness** (รัน production pipeline จริงต่อคำถาม)
+
+### ปัญหา: LLM-judge ติด rate-limit
+
+judge ยิง sub-call เยอะ (context_precision ~8 call/คำถาม → รวม ~150 call/run) → free-tier ของ provider เดี่ยวติด 429 กลางคัน → metric หลายตัวได้ `null`
+
+### แก้: Failover judge (round-robin ข้าม provider)
+
+`--judge-failover` สร้าง custom LangChain chat model ที่ **หมุน judge call ข้าม 5 provider** (nvidia → groq → sambanova → cerebras → openrouter, ทั้งหมดรัน llama-3.3-70b) แบบ round-robin + failover → รวม rate budget ~5 เท่า
+
+| วิธี | ผล full 10 คำถาม |
+|---|---|
+| judge เดี่ยว (nvidia/sambanova) | 45+ error, 2-3 metric เป็น `null` |
+| **failover judge + `--max-workers 1`** | error ~5, **ครบ 5 metric** (coverage 9-10/10) |
+
+```bash
+python -m eval.ragas_eval --judge-failover --max-workers 1
+```
+
+เทคนิคเสริม: `strictness=1` (กัน `"n">1` ที่ cloud ไม่รองรับ) · `--judge-provider/-model/-key` (เลือก judge เจาะจง) · `reasoning_effort=low` สำหรับ gpt-oss judge กัน timeout
 
 ---
 
@@ -391,6 +482,10 @@ ENABLE_RELATIONSHIP_SEARCH=true
 | 🕸️ **Knowledge Graph** | `/graph` | 🔒 ต้องล็อกอิน | Force-directed graph · zoom/pan · click node → relationships · filter by type |
 | 📭 **Missed Q** | `/unanswered` | 🔒 ต้องล็อกอิน | คำถามที่ RAG ตอบไม่ได้ · ทดสอบ 2 โหมด (RAG `force_rag=true` / Floating Chat streaming) · filter · export |
 | 📋 **Audit Logs** | `/audit` | 🔒 ต้องล็อกอิน | บันทึกการกระทำทั้งหมด · filter by action / company / status · paginated |
+| 🧪 **Eval** | `/eval` | 🔒 ต้องล็อกอิน | ผล Ragas evaluation (5 metrics) · per-question scores |
+| 🤖 **Providers** | `/providers` | 🔒 ต้องล็อกอิน | จัดการ AI provider + role failover chain · test · dropdown เลือก model (free/kind filter) · embed badge แสดงมิติ |
+
+> **เมนูจัดเป็นหมวด dropdown:** 💬 Chat · 📚 ความรู้ (Wiki/QA/Sources/Graph) · 🔧 ระบบงาน (Jobs/Missed Q/Audit) · 🤖 AI (Providers/Eval) · 🛠️ Settings
 
 ### 💬 Floating Chat Widget
 
@@ -410,8 +505,9 @@ Widget ถาม-ตอบแบบ SSE streaming ที่ฝังอยู่
 | 🌐 Frontend | Next.js 14+, TypeScript, Tailwind CSS | Web UI |
 | 🗄️ Database | Supabase Cloud, PostgreSQL | Primary Data Store |
 | 🔍 Vector Search | pgvector + IVFFlat index | ANN Similarity Search (1024d cosine) |
-| 🤖 LLM (Chat/Wiki/QA/Graph) | Ollama Cloud `gpt-oss:20b-cloud` | Generation |
-| 🔢 Embeddings | Ollama Local `mxbai-embed-large` 1024d | Vectorization |
+| 🔀 AI Routing | DB-backed Provider Router + auto-failover | role → provider chain (429/error → next) |
+| 🤖 LLM (Chat/Wiki/QA/Graph) | OpenAI-compat providers: cerebras · groq · sambanova · nvidia · openrouter · **Gemini** · Ollama | Generation (failover chain) |
+| 🔢 Embeddings | **Gemini `gemini-embedding-001`** 1024d *(fallback: Ollama `mxbai-embed-large`)* | Vectorization |
 | 🕷️ Crawler 1 | Trafilatura + httpx + BeautifulSoup4 | Static HTML extraction (default) |
 | 🎭 Crawler 2 | Playwright 1.60 + Chromium | JS-rendered pages |
 | 🤖 Crawler 3 | crawl4ai 0.8.6 + Patchright | LLM-aware Markdown extraction |
@@ -444,6 +540,8 @@ Widget ถาม-ตอบแบบ SSE streaming ที่ฝังอยู่
 | `user_feedback` | ⭐ User rating & feedback on answers |
 | `unanswered_questions` | 📭 **คำถามที่ RAG ตอบไม่ได้** — บันทึกอัตโนมัติเมื่อไม่มีข้อมูล |
 | `audit_logs` | 📋 **Audit trail** — บันทึก action, IP, api_key_tag, company, status, detail (JSONB) |
+| `ai_providers` | 🔀 **AI provider registry** — name, base_url, api_key, protocol (OpenAI-compat) |
+| `ai_role_assignments` | 🔗 **Role → provider chain** — role, provider_id, model, priority (ลำดับ failover) |
 
 > All vector columns use `ivfflat` index with `vector_cosine_ops` for fast ANN search.
 
@@ -477,7 +575,10 @@ backend/sql/002_schema.sql               ← สร้าง tables + indexes �
 backend/sql/003_rpc.sql                  ← สร้าง RPC functions สำหรับ vector search (1024d)
 backend/sql/007_unanswered_questions.sql ← สร้าง unanswered_questions table
 backend/sql/009_audit_logs.sql          ← สร้าง audit_logs table
+backend/sql/010_ai_providers.sql        ← สร้าง ai_providers + ai_role_assignments (multi-provider failover)
 ```
+
+> หลังรัน `010` แล้ว seed provider + chain ผ่านหน้า `/providers` (หรือ `scripts/seed_providers.py` + env keys) — ระบบจะ fallback ไป `.env`/local เองถ้ายังไม่ตั้ง
 
 > **Upgrading from a previous install?** ถ้าเคยรันกับ `nomic-embed-text` (768d) แล้วเปลี่ยนมาใช้ `mxbai-embed-large` (1024d) ให้รัน migration เพิ่มก่อน:
 > ```
@@ -594,18 +695,20 @@ ANSWER_LLM_MODEL=qwen2.5:14b-instruct   # ใช้เมื่อ ANSWER_LLM_US
 # Local LLM server (canonical QA matching, query rewrite, optional answer gen)
 LOCAL_LLM_BASE_URL=http://llm-server:11434
 
-# Ollama Local (Embeddings — ต้องรัน local Ollama ที่มี mxbai-embed-large)
+# Embeddings — fallback เมื่อไม่ได้ตั้ง provider role `embed`
+# (production แนะนำตั้ง role embed = Gemini gemini-embedding-001 ผ่านหน้า /providers)
 OLLAMA_EMBED_BASE_URL=http://localhost:11434
 OLLAMA_EMBED_MODEL=mxbai-embed-large
-EMBEDDING_DIM=1024
+EMBEDDING_DIM=1024        # ต้องตรงกับคอลัมน์ vector(N) ของ DB (ส่งเป็น dimensions ให้ gemini)
 ```
 
-> **⚠️ Embedding model & ภาษาไทย:** `mxbai-embed-large` ให้ vector เกือบเหมือนกันสำหรับข้อความไทย
-> ทำให้ vector search อ่อนกับไทย — ระบบชดเชยด้วย text search + character n-gram matching
-> หากเปลี่ยน embedding model ต้อง re-embed ทั้ง DB และจูน threshold ใหม่ทั้งหมด
+> **🔢 Embeddings (ปัจจุบัน):** ใช้ **Gemini `gemini-embedding-001` @ 1024d** ผ่าน provider role `embed`
+> (แยกแยะไทยได้ดี spread ~0.45) — ดูหัวข้อ *Multi-Provider AI Failover → Embeddings*
+> `EMBEDDING_DIM` ต้องตรงกับคอลัมน์ `vector(N)` ของ DB เสมอ · เปลี่ยน model/มิติ → re-embed ทั้งหมด
 
-> **หมายเหตุ**: Cloud Ollama (`https://ollama.com`) รองรับเฉพาะ chat model — ไม่มี embedding model
-> ต้องใช้ local Ollama สำหรับ embeddings เสมอ
+> **⚠️ ค่า `.env` ด้านบนเป็น fallback** — `mxbai-embed-large` ให้ vector เกือบเหมือนกันสำหรับข้อความไทย
+> (vector search ไทยอ่อน ต้องชดเชยด้วย text search + n-gram) จึงย้ายมา Gemini เป็นหลัก
+> Cloud Ollama (`https://ollama.com`) ไม่มี embedding model — fallback ต้องใช้ local Ollama
 
 ### Authentication Settings
 
@@ -690,6 +793,17 @@ DAILY_CRAWL_CRON_MINUTE=0    # นาทีที่รัน
 |---|---|---|---|
 | `GET` | `/api/audit/logs` | 🔒 | Paginated audit log (filter: `company_code`, `action`, `status`) |
 | `GET` | `/api/audit/actions` | 🔒 | List known action names สำหรับ filter dropdown |
+
+### 🤖 AI Providers
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/providers` | 🔒 | List providers (key masked) + roles |
+| `POST` · `PUT` · `DELETE` | `/api/providers[/{id}]` | 🔒 | CRUD provider |
+| `POST` | `/api/providers/{id}/test` | 🔒 | Test chat — auto-pick model หรือระบุ `?model=` |
+| `GET` | `/api/providers/{id}/models` | 🔒 | List models (`?free_only=`, `?kind=chat\|embed\|all`) |
+| `GET` | `/api/providers/roles` | 🔒 | List role assignments + `embedding_dim` |
+| `POST` · `PUT` · `DELETE` | `/api/providers/roles[/{id}]` | 🔒 | จัดการ failover chain (embed = single, ตอบ 409 ถ้าเกิน 1) |
 
 ### 🔗 Sources
 
@@ -791,16 +905,21 @@ enterprise-llm-wiki/
 │   │       ├── wiki_service.py
 │   │       ├── qa_service.py
 │   │       ├── chat_service.py          # answer() + answer_stream() + unanswered tracking
-│   │       ├── ollama_client.py         # Ollama HTTP client (chat + embed)
+│   │       ├── provider_service.py      # 🔀 DB-backed multi-provider failover (chat + embed)
+│   │       ├── ollama_client.py         # Ollama client + EmbeddingRouter (provider-first)
 │   │       ├── extraction_service.py
 │   │       ├── chunking_service.py
 │   │       ├── file_loader_service.py
 │   │       └── job_service.py
+│   │   # api/providers.py — provider/role CRUD + /models + /test
+│   ├── eval/                # 🧪 Ragas evaluation (ragas_eval.py + failover judge)
+│   ├── scripts/             # reembed_all.py · seed_providers.py · ...
 │   ├── sql/
 │   │   ├── 001_extensions.sql
 │   │   ├── 002_schema.sql
 │   │   ├── 003_rpc.sql
-│   │   └── 007_unanswered_questions.sql
+│   │   ├── 007_unanswered_questions.sql
+│   │   └── 010_ai_providers.sql        # 🔀 ai_providers + ai_role_assignments
 │   ├── requirements.txt
 │   └── Dockerfile
 │
@@ -852,6 +971,7 @@ enterprise-llm-wiki/
 | Phase 3.5 — GraphRAG | ✅ Done | Entity relationship extraction, graph expansion in retrieval, QA CRUD, full frontend |
 | Phase 3.8 — Public Demo | ✅ Done | Landing page, Floating Chat widget (SSE), unanswered question tracking, Cloudflare tunnel |
 | Phase 4 — Production | ✅ Done | ~~Authentication~~ · ~~Docker hardening~~ · ~~Input validation~~ · ~~Structured logging~~ · ~~RLS per company~~ · ~~Rate limiting~~ · ~~Crawler retry~~ · ~~Job retry~~ · ~~Audit logs~~ · ~~RAG Evaluation (Ragas)~~ · ~~Embedding upgrade (bge-m3)~~ · ~~Multilingual reranker~~ |
+| Phase 4.5 — Multi-Provider AI | ✅ Done | ~~DB-backed provider router + auto-failover chain~~ · ~~Provider UI (test/model dropdown)~~ · ~~Gemini via OpenAI-compat~~ · ~~Gemini embeddings @1024 (fix Thai vector collapse)~~ · ~~Ragas failover judge~~ |
 | Phase 5 — Agentic | 📋 Planned | LangGraph planner, multi-step retrieval, validation agent, full GraphRAG traversal |
 
 ---

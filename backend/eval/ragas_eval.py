@@ -138,10 +138,91 @@ def build_dataset(samples: list[dict]):
     )
 
 
+# ── Failover judge — round-robin across providers to beat per-minute limits ──
+
+# Default judge chain: non-reasoning Llama-3.3-70B across every provider that
+# hosts it (+ cerebras gpt-oss as a reasoning fallback). Each judge sub-call is
+# round-robined to the next provider, so the combined rate budget is ~Nx a
+# single provider's — which is what lets the full eval finish without 429s.
+_JUDGE_CHAIN = [
+    ("nvidia",     "meta/llama-3.3-70b-instruct"),
+    ("groq",       "llama-3.3-70b-versatile"),
+    ("sambanova",  "Meta-Llama-3.3-70B-Instruct"),
+    ("cerebras",   "gpt-oss-120b"),
+    ("openrouter", "meta-llama/llama-3.3-70b-instruct:free"),
+]
+
+
+def _resolve_judge_chain(names_models=None) -> list[dict]:
+    """Pull (base_url, api_key, model) for each provider in the judge chain."""
+    rows = {p["name"]: p for p in supabase.table("ai_providers").select("*").execute().data or []}
+    chain = []
+    for name, model in (names_models or _JUDGE_CHAIN):
+        p = rows.get(name)
+        if p and p.get("api_key"):
+            chain.append({"name": name, "base_url": p["base_url"], "api_key": p["api_key"], "model": model})
+    return chain
+
+
+def _make_failover_judge(chain: list[dict], max_tokens: int = 2000):
+    """Build a LangChain chat model that round-robins + fails over across the
+    judge chain on any rate-limit/transient error."""
+    from itertools import count
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+    from langchain_core.outputs import ChatResult, ChatGeneration
+    from pydantic import PrivateAttr
+    from app.services.provider_service import ProviderService
+
+    def _to_openai(m) -> dict:
+        role = "system" if isinstance(m, SystemMessage) else "assistant" if isinstance(m, AIMessage) else "user"
+        return {"role": role, "content": m.content}
+
+    class FailoverChatModel(BaseChatModel):
+        providers: list[dict]
+        request_max_tokens: int = max_tokens
+        _counter: object = PrivateAttr(default_factory=lambda: count())
+
+        @property
+        def _llm_type(self) -> str:
+            return "failover-openai"
+
+        async def _failover(self, messages: list[dict]) -> str:
+            payload = [_to_openai(m) for m in messages]
+            n = len(self.providers)
+            start = next(self._counter) % n          # round-robin entry point
+            last = None
+            for i in range(n):
+                p = self.providers[(start + i) % n]
+                try:
+                    out = await ProviderService._openai_chat(
+                        p["base_url"], p["api_key"], p["model"], payload, 0.0, self.request_max_tokens,
+                    )
+                    if out and out.strip():
+                        return out
+                    raise ValueError("empty content")
+                except Exception as exc:        # noqa: BLE001 — try the next provider
+                    last = exc
+                    continue
+            raise RuntimeError(f"all judge providers failed: {last}")
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+            content = await self._failover(messages)
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+            import asyncio
+            content = asyncio.run(self._failover(messages))
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
+
+    return FailoverChatModel(providers=chain)
+
+
 # ── Step 3: configure metrics with our own Ollama LLM ────────────────────────
 
 def build_metrics(samples: list[dict], judge_base_url: str | None = None,
-                  judge_model: str | None = None, judge_key: str | None = None):
+                  judge_model: str | None = None, judge_key: str | None = None,
+                  judge_failover: bool = False):
     import warnings
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -151,27 +232,33 @@ def build_metrics(samples: list[dict], judge_base_url: str | None = None,
     from langchain_openai import ChatOpenAI
     from langchain_community.embeddings import OllamaEmbeddings
 
-    # An OpenAI-compatible judge. By default the local/cloud Ollama; override with
-    # --judge-base-url/--judge-model/--judge-key to use a fast, reliable provider
-    # (e.g. cerebras gpt-oss-120b) so the LLM-judge metrics don't time out.
-    judge_base  = judge_base_url or settings.OLLAMA_BASE_URL
-    base_v1     = judge_base if judge_base.rstrip("/").endswith("/v1") else f"{judge_base.rstrip('/')}/v1"
-    judge_mdl   = judge_model or settings.OLLAMA_CHAT_MODEL
-    judge_api   = judge_key or (settings.OLLAMA_API_KEY or "ollama")
-    print(f"  Judge → {base_v1}  model={judge_mdl}")
-
-    # gpt-oss reasoning models can spend the whole budget "thinking" and time
-    # out on judge prompts — force low reasoning effort to keep them snappy.
-    extra_body = {"reasoning_effort": "low"} if "gpt-oss" in judge_mdl.lower() else {}
-    chat_lc = ChatOpenAI(
-        base_url=base_v1,
-        api_key=judge_api,
-        model=judge_mdl,
-        temperature=0,
-        timeout=90,
-        max_retries=4,
-        extra_body=extra_body,
-    )
+    if judge_failover:
+        # Round-robin judge across all providers → combined rate budget beats the
+        # per-minute 429s that kill a single-provider full run.
+        chain = _resolve_judge_chain()
+        print(f"  Judge → FAILOVER round-robin: {[c['name'] for c in chain]}")
+        chat_lc = _make_failover_judge(chain)
+    else:
+        # An OpenAI-compatible judge. By default the local/cloud Ollama; override
+        # with --judge-base-url/--judge-model/--judge-key to use a fast, reliable
+        # provider (e.g. cerebras gpt-oss-120b) so LLM-judge metrics don't time out.
+        judge_base  = judge_base_url or settings.OLLAMA_BASE_URL
+        base_v1     = judge_base if judge_base.rstrip("/").endswith("/v1") else f"{judge_base.rstrip('/')}/v1"
+        judge_mdl   = judge_model or settings.OLLAMA_CHAT_MODEL
+        judge_api   = judge_key or (settings.OLLAMA_API_KEY or "ollama")
+        print(f"  Judge → {base_v1}  model={judge_mdl}")
+        # gpt-oss reasoning models can spend the whole budget "thinking" and time
+        # out on judge prompts — force low reasoning effort to keep them snappy.
+        extra_body = {"reasoning_effort": "low"} if "gpt-oss" in judge_mdl.lower() else {}
+        chat_lc = ChatOpenAI(
+            base_url=base_v1,
+            api_key=judge_api,
+            model=judge_mdl,
+            temperature=0,
+            timeout=90,
+            max_retries=4,
+            extra_body=extra_body,
+        )
     # Local Ollama for embeddings (Answer Relevancy uses cosine similarity)
     embed_lc = OllamaEmbeddings(
         base_url=settings.OLLAMA_EMBED_BASE_URL,
@@ -320,6 +407,9 @@ def main() -> None:
                              "pulls base_url+key automatically. Combine with --judge-model.")
     parser.add_argument("--max-workers", type=int, default=2,
                         help="Parallel judge calls. Use 1 for rate-limited cloud judges.")
+    parser.add_argument("--judge-failover", action="store_true",
+                        help="Round-robin the judge across ALL providers (beats per-minute 429s "
+                             "on full runs). Ignores --judge-provider/-model/-key.")
     args = parser.parse_args()
 
     # Resolve --judge-provider (DB lookup) into base_url/key
@@ -373,6 +463,7 @@ def main() -> None:
         judge_base_url=args.judge_base_url,
         judge_model=args.judge_model,
         judge_key=args.judge_key,
+        judge_failover=args.judge_failover,
     )
     run_config = RunConfig(
         max_workers=args.max_workers,  # 1 = sequential → avoids cloud 429 bursts

@@ -1,6 +1,9 @@
 import json
+import logging
 import httpx
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaClient:
@@ -108,6 +111,30 @@ class OllamaClient:
             raise RuntimeError(f"No embedding in response: {data}")
 
 
+class EmbeddingRouter:
+    """Drop-in for the embed client: route through the DB-backed provider
+    failover (role=embed) when configured, otherwise fall back to local Ollama.
+
+    Wrapping the singleton here means every caller that imports ``embed_llm``
+    (ingest, retrieval, wiki/qa generation, re-embed) is switched at once."""
+
+    def __init__(self, fallback: OllamaClient):
+        self._fallback = fallback
+
+    async def embed(self, text: str, model: str | None = None) -> list[float]:
+        # Lazy import avoids any import-order coupling with provider_service.
+        from app.services.provider_service import provider_service
+        if provider_service.is_configured("embed"):
+            # Use the configured embedder EXCLUSIVELY — no fallback to a different
+            # model. mxbai and gemini live in different vector spaces, so falling
+            # back would silently break retrieval (query vs stored docs mismatch).
+            # provider_service.embed already retries transient rate-limits.
+            return await provider_service.embed("embed", text)
+        # No embed role configured → use the .env Ollama model (its vectors match
+        # whatever the data was embedded with).
+        return await self._fallback.embed(text, model=model)
+
+
 chat_llm = OllamaClient(settings.OLLAMA_BASE_URL, settings.OLLAMA_API_KEY)
-embed_llm = OllamaClient(settings.OLLAMA_EMBED_BASE_URL, settings.OLLAMA_EMBED_API_KEY)
+embed_llm = EmbeddingRouter(OllamaClient(settings.OLLAMA_EMBED_BASE_URL, settings.OLLAMA_EMBED_API_KEY))
 local_llm = OllamaClient(settings.LOCAL_LLM_BASE_URL)   # local server for Qwen2.5 etc.
