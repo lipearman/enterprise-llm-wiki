@@ -362,6 +362,23 @@ python -m eval.ragas_eval --judge-failover --max-workers 1
 
 เทคนิคเสริม: `strictness=1` (กัน `"n">1` ที่ cloud ไม่รองรับ) · `--judge-provider/-model/-key` (เลือก judge เจาะจง) · `reasoning_effort=low` สำหรับ gpt-oss judge กัน timeout
 
+### ผลที่วัดได้ (eval-driven improvements)
+
+ใช้ eval ขับการปรับจริง — score ขยับจากของเดิมมาก (DEVES, 10 คำถาม):
+
+| Config | Faithfulness | Context Recall | Answer Correctness | metric ≥0.8 |
+|---|---|---|---|---|
+| baseline (mxbai + typhoon) | 0.37 | 0.78 | 0.70 | 0 |
+| + Gemini embed + answer | 0.80 | 0.74 | 0.73 | 1 |
+| **+ LLM reranker** ⭐ | **0.83** | **0.98** | **0.83** | **3** |
+
+**LLM reranker** (`ENABLE_LLM_RERANK`): retrieve 40 → ส่ง top-20 (snippet) ให้ Gemini จัดอันดับตามความเกี่ยวข้อง → keep top-8
+- ใช้ผ่าน `answer_llm` provider chain (failover ในตัว) — จัดไทยได้ดี ต่างจาก FlashRank `ms-marco` ที่เป็น **English** (จัด relevant doc ไทยอยู่ล่างสุด)
+- fallback เป็น order เดิมถ้า LLM ล้ม/parse พัง → retrieval ไม่มีวันพังเพราะ rerank
+- แลกกับ ~1 LLM call/query (latency +1-2s)
+
+> **บทเรียนจาก eval:** (1) **ลด chunk โดยไม่ rerank → แย่ลงทุกตัว** (ลำดับห่วยตัดมั่ว) · (2) reranker ต้อง **เข้าใจภาษาของ content** — English cross-encoder จัดไทยกลับด้าน · (3) **precision ↔ recall trade-off** เป็นกำแพงจริง: keep มาก = recall สูง/precision ต่ำ, keep น้อย = กลับกัน → "0.8 ทุกตัวพร้อมกัน" ติดเพดานเชิงโครงสร้าง ไม่ใช่แค่จูนไม่พอ
+
 ---
 
 ## ⚡ Retrieval Latency Optimization
@@ -514,7 +531,7 @@ Widget ถาม-ตอบแบบ SSE streaming ที่ฝังอยู่
 | ✂️ Chunking | LangChain Text Splitters | Document Splitting |
 | 📄 File Parsing | pypdf, python-docx, openpyxl | PDF / DOCX / XLSX |
 | ⏰ Jobs | APScheduler 3.11 | Background Scheduling (in-process, daily cron) |
-| 🔀 Reranker | FlashRank *(optional)* | Cross-encoder Reranking |
+| 🔀 Reranker | **LLM reranker** (Gemini via provider chain — Thai-capable) · FlashRank *(English fallback)* | Relevance reranking of retrieved chunks |
 | 🌐 Tunnel | cloudflared | Cloudflare Quick Tunnel (dev/demo) |
 | 🐳 Deploy | Docker, Docker Compose | Containerization |
 | 🔁 CI/CD | GitHub Actions | Auto test on push (main + master) |
@@ -762,7 +779,8 @@ DAILY_CRAWL_CRON_MINUTE=0    # นาทีที่รัน
 | `ENABLE_CHUNK_SEARCH` | `true` | 🧩 Include raw document chunks in retrieval |
 | `ENABLE_RELATIONSHIP_SEARCH` | `true` | 🕸️ GraphRAG — graph-based context expansion |
 | `ENABLE_METADATA_SEARCH` | `true` | 🏷️ Boost score ด้วย title/slug keyword matching |
-| `ENABLE_RERANKER` | `false` | 🔀 FlashRank cross-encoder reranking |
+| `ENABLE_RERANKER` | `false` | 🔀 FlashRank cross-encoder reranking (English — ไม่เหมาะไทย) |
+| `ENABLE_LLM_RERANK` | `true` | 🔀 **LLM reranker** (Gemini via provider chain — Thai-capable, ใช้แทน FlashRank) |
 | `ENABLE_QUERY_REWRITE` | `true` | ✏️ LLM-based query rewriting |
 | `ENABLE_GROUNDING` | `true` | 📌 Source-grounded answer generation |
 | `ENABLE_SCHEDULER` | `true` | ⏰ APScheduler daily crawl |
@@ -970,7 +988,7 @@ enterprise-llm-wiki/
 | Phase 3 — Enterprise Jobs | ✅ Done | Multi-crawler, APScheduler, change detection, file upload, job monitor UI |
 | Phase 3.5 — GraphRAG | ✅ Done | Entity relationship extraction, graph expansion in retrieval, QA CRUD, full frontend |
 | Phase 3.8 — Public Demo | ✅ Done | Landing page, Floating Chat widget (SSE), unanswered question tracking, Cloudflare tunnel |
-| Phase 4 — Production | ✅ Done | ~~Authentication~~ · ~~Docker hardening~~ · ~~Input validation~~ · ~~Structured logging~~ · ~~RLS per company~~ · ~~Rate limiting~~ · ~~Crawler retry~~ · ~~Job retry~~ · ~~Audit logs~~ · ~~RAG Evaluation (Ragas)~~ · ~~Embedding upgrade (bge-m3)~~ · ~~Multilingual reranker~~ |
+| Phase 4 — Production | ✅ Done | ~~Authentication~~ · ~~Docker hardening~~ · ~~Input validation~~ · ~~Structured logging~~ · ~~RLS per company~~ · ~~Rate limiting~~ · ~~Crawler retry~~ · ~~Job retry~~ · ~~Audit logs~~ · ~~RAG Evaluation (Ragas + failover judge)~~ · ~~Embedding upgrade (Gemini gemini-embedding-001 @1024)~~ · ~~LLM reranker (Thai-capable, via provider chain)~~ |
 | Phase 4.5 — Multi-Provider AI | ✅ Done | ~~DB-backed provider router + auto-failover chain~~ · ~~Provider UI (test/model dropdown)~~ · ~~Gemini via OpenAI-compat~~ · ~~Gemini embeddings @1024 (fix Thai vector collapse)~~ · ~~Ragas failover judge~~ |
 | Phase 5 — Agentic | 📋 Planned | LangGraph planner, multi-step retrieval, validation agent, full GraphRAG traversal |
 

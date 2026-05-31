@@ -1,8 +1,10 @@
+import json
 import logging
 import math
 from app.core.config import settings
 from app.core.text import normalize_question, sha256_text
 from app.services.ollama_client import embed_llm, local_llm
+from app.services.provider_service import provider_service, AllProvidersFailedError
 from app.db.supabase_client import supabase
 
 logger = logging.getLogger(__name__)
@@ -241,8 +243,10 @@ class RetrievalService:
 
         rows.sort(key=lambda x: x.get("similarity", 0), reverse=True)
 
-        # ── FlashRank reranker (optional) ─────────────────────────────────
-        if settings.ENABLE_RERANKER and rows:
+        # ── Reranker (LLM-based preferred — handles Thai; else FlashRank) ──
+        if settings.ENABLE_LLM_RERANK and rows:
+            rows = await self._llm_rerank(question, rows)
+        elif settings.ENABLE_RERANKER and rows:
             rows = self._rerank(question, rows)
 
         # ── De-duplicate near-identical content ───────────────────────────
@@ -287,6 +291,45 @@ class RetrievalService:
             seen.add(key)
             out.append(r)
         return out
+
+    async def _llm_rerank(self, question: str, rows: list[dict]) -> list[dict]:
+        """Reorder candidates by relevance using the answer_llm provider chain
+        (Gemini) — handles Thai well, unlike the English ms-marco FlashRank model.
+        Reranks the top LLM_RERANK_CANDIDATES by similarity; the rest are appended
+        unchanged. Falls back to the original order on any failure."""
+        if not provider_service.is_configured("answer_llm"):
+            return rows
+        pool_n = min(len(rows), settings.LLM_RERANK_CANDIDATES)
+        pool = rows[:pool_n]
+        keep = settings.RERANK_TOP_K
+        passages = "\n".join(
+            f"[{i}] {(r.get('content_markdown') or r.get('content') or r.get('answer') or '')[:300].strip()}"
+            for i, r in enumerate(pool)
+        )
+        sys_msg = "คุณเป็นตัวจัดอันดับความเกี่ยวข้องของเอกสารค้นหา ตอบเป็น JSON array ของหมายเลขเท่านั้น"
+        user_msg = (
+            f"คำถาม: {question}\n\nเอกสาร:\n{passages}\n\n"
+            f"จัดอันดับหมายเลขเอกสารที่ช่วยตอบคำถามได้ตรงที่สุด เรียงจากตรงสุดไปน้อยสุด "
+            f"คืนเฉพาะ JSON array ของหมายเลข (เช่น [3,0,7]) เอา {keep} อันดับแรก ไม่ต้องอธิบาย"
+        )
+        try:
+            out = await provider_service.chat(
+                "answer_llm",
+                [{"role": "system", "content": sys_msg}, {"role": "user", "content": user_msg}],
+                temperature=0.0, max_tokens=200,
+            )
+            a, b = out.find("["), out.rfind("]")
+            order = json.loads(out[a:b + 1]) if (a >= 0 and b > a) else []
+            order = [i for i in order if isinstance(i, int) and 0 <= i < pool_n]
+        except Exception as exc:
+            logger.warning("llm_rerank | skipped: %s", str(exc)[:120])
+            return rows
+        if not order:
+            return rows
+        seen = set(order)
+        reranked = [pool[i] for i in order] + [pool[i] for i in range(pool_n) if i not in seen]
+        logger.info("llm_rerank | reordered top %d → %r", pool_n, order[:keep])
+        return reranked + rows[pool_n:]
 
     @staticmethod
     def _rerank(question: str, rows: list[dict]) -> list[dict]:

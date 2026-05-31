@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     ENABLE_WIKI_SEARCH: bool = True
     ENABLE_CHUNK_SEARCH: bool = True
     ENABLE_RERANKER: bool = True
+    # LLM-based reranker — uses the answer_llm provider chain (Gemini) to reorder
+    # candidates by relevance. Handles Thai well (unlike the English ms-marco
+    # FlashRank model). Adds ~1 LLM call/query. Takes precedence over ENABLE_RERANKER.
+    ENABLE_LLM_RERANK: bool = False
+    LLM_RERANK_CANDIDATES: int = 20   # how many top-similarity chunks to send to the LLM
     ENABLE_QUERY_REWRITE: bool = False
     ENABLE_GROUNDING: bool = True
     ENABLE_RELATIONSHIP_SEARCH: bool = False
