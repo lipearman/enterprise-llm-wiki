@@ -19,6 +19,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app ./app
 COPY scripts ./scripts
+# eval result snapshots (JSON) — powers the "Latest RAG Eval" card in /analytics
+COPY eval/results ./eval/results
 
 RUN chown -R appuser:appgroup /app
 USER appuser
