@@ -31,7 +31,8 @@ def _ping_db() -> bool:
     """Quick row-count query against a small table — fails fast if Supabase is unreachable."""
     try:
         from app.db.supabase_client import supabase
-        supabase.table("companies").select("id").limit(1).execute()
+        # companies PK is company_code (text) — there is no `id` column
+        supabase.table("companies").select("company_code").limit(1).execute()
         return True
     except Exception as e:
         logger.warning(f"Health DB ping failed: {e}")
