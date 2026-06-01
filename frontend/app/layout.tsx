@@ -15,6 +15,7 @@ type NavLink = { href: string; label: string; exact?: boolean };
 type NavNode = NavLink | { label: string; children: NavLink[] };
 
 const NAV: NavNode[] = [
+  { href: "/analytics", label: "📊 Analytics", exact: false },
   { href: "/chat", label: "💬 Chat", exact: true },
   {
     label: "📚 ความรู้",

@@ -617,39 +617,59 @@ class RetrievalService:
     async def _expand_via_relationships(
         self, base_rows: list[dict], company_code: str, q_emb: list[float]
     ) -> list[dict]:
-        """Expand context by following wiki_relationships edges from found pages."""
+        """Phase 5.2 — multi-hop GraphRAG traversal.
+
+        BFS over wiki_relationships edges starting from the top wiki pages, up to
+        GRAPHRAG_MAX_HOPS deep. Entities discovered further away get a lower
+        similarity score (hop-distance decay) so near neighbours rank higher."""
         from app.services.relationship_service import relationship_service
 
         top_wiki = [r for r in base_rows if r.get("source_type") == "wiki"][:3]
-        entities = [r.get("title", "") for r in top_wiki if r.get("title")]
-        if not entities:
+        seed = [r.get("title", "") for r in top_wiki if r.get("title")]
+        if not seed:
             return []
 
-        graph_rows = relationship_service.find_related_entities(company_code, entities)
-        if not graph_rows:
-            return []
+        max_hops = max(1, settings.GRAPHRAG_MAX_HOPS)
+        visited: set[str] = set(seed)
+        frontier: list[str] = list(seed)
+        discovered: dict[str, int] = {}     # entity → hop distance from seed
 
-        related_entities: set[str] = set()
-        for gr in graph_rows:
-            related_entities.add(gr["source_entity"])
-            related_entities.add(gr["target_entity"])
-        related_entities -= set(entities)
+        for hop in range(1, max_hops + 1):
+            graph_rows = relationship_service.find_related_entities(company_code, frontier)
+            if not graph_rows:
+                break
+            next_frontier: list[str] = []
+            for gr in graph_rows:
+                for entity in (gr.get("source_entity"), gr.get("target_entity")):
+                    if entity and entity not in visited:
+                        visited.add(entity)
+                        discovered[entity] = hop
+                        next_frontier.append(entity)
+            if not next_frontier:
+                break
+            frontier = next_frontier[:8]    # cap fan-out per hop
+        if not discovered:
+            return []
 
         extra_rows: list[dict] = []
-        for entity in list(related_entities)[:5]:
+        for entity, hop in list(discovered.items())[:10]:   # cap total expanded pages
             try:
                 res = supabase.table("wiki_pages").select(
                     "id,title,slug,content_markdown,source_urls"
-                ).eq("company_code", company_code).ilike("title", f"%{entity}%").limit(2).execute()
+                ).eq("company_code", company_code).ilike("title", f"%{entity}%").limit(1).execute()
                 for page in (res.data or []):
                     extra_rows.append({
                         **page,
                         "source_type": "wiki_relationship",
-                        "similarity": 0.5,
+                        "similarity": max(0.30, 0.60 - 0.15 * (hop - 1)),  # decay by hop distance
+                        "_hop": hop,
                     })
             except Exception as e:
                 logger.warning(f"Relationship expand failed for entity '{entity}': {e}")
 
+        if extra_rows:
+            logger.info("graphrag_expand | hops=%d | discovered=%d | pages=%d",
+                        max_hops, len(discovered), len(extra_rows))
         return extra_rows
 
     def cache_key(self, question: str, company_code: str) -> str:

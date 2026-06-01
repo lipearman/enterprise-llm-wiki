@@ -192,13 +192,22 @@ export default function FloatingChat() {
             done?: boolean;
             sources?: SourceRef[];
             error?: string;
-            status?: string;   // "thinking" heartbeat — keep-alive, no UI change
+            status?: string;   // "thinking" heartbeat or agent step name
+            label?: string;    // human-readable step label (LangGraph agent steps)
           };
           try { payload = JSON.parse(part.slice(6)); }
           catch { continue; }
 
-          // Heartbeat — just keep the connection alive, typing dots already showing
-          if (payload.status === "thinking") continue;
+          // Status event — show the agent step label (LangGraph) while we wait;
+          // a plain "thinking" heartbeat has no label and just keeps alive.
+          if (payload.status) {
+            if (payload.label && !accumulated) {
+              setMessages((m) =>
+                m.map((msg) => (msg.id === bid ? { ...msg, text: payload.label! } : msg))
+              );
+            }
+            continue;
+          }
 
           if (payload.token !== undefined) {
             accumulated += payload.token;

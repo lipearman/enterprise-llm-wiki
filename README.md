@@ -381,6 +381,62 @@ python -m eval.ragas_eval --judge-failover --max-workers 1
 
 ---
 
+## 🤖 Agentic RAG (Phase 5)
+
+ยกระดับจาก linear pipeline → **agent ที่วางแผน + ตรวจสอบ + แก้ตัวเองได้** (opt-in ผ่าน flags, default off):
+
+### Flow แบบ agentic
+```
+_plan_query  →  simple? ──→ single-pass RAG (เร็ว)
+                complex? ─→ _agentic_rag loop:
+                              retrieve → generate → _validate_answer (grounded+ครบ?)
+                                ├─ พอแล้ว → คืนคำตอบ
+                                └─ ยังขาด → _reformulate_query(จาก feedback) → retrieve+generate ใหม่ (≤ AGENTIC_MAX_ITERS)
+```
+
+| ส่วนประกอบ | ทำอะไร | Flag |
+|---|---|---|
+| **Query planner** | LLM จัดประเภท simple/complex → simple ไป single-pass เร็ว, complex ไป agentic loop (กัน latency เปลือง) | `ENABLE_QUERY_PLANNER` |
+| **Multi-step retrieval** | retrieve→validate→reformulate→retrieve ซ้ำ จน critic พอใจ | `ENABLE_AGENTIC_ANSWER` |
+| **Validation agent** | LLM critic ตัดสิน "คำตอบ grounded + ครบไหม" คืน `{sufficient, missing}` | (มากับ agentic) |
+| **Multi-hop GraphRAG** | BFS เดิน wiki_relationships 2-3 hop + ให้คะแนน decay ตามระยะ hop | `GRAPHRAG_MAX_HOPS`, `ENABLE_RELATIONSHIP_SEARCH` |
+
+### หลักการออกแบบ
+- **lightweight async loop แทน LangGraph** — fit สถาปัตยกรรม service เดิม, ไม่ลง framework หนัก, ship เร็ว (LangGraph เป็น Phase 6)
+- **fail-open** — critic/planner ล่ม/429 → ถือว่าผ่าน ไม่ loop ค้าง · ใช้ `answer_llm` provider chain (failover ในตัว)
+- **gate ทุกตัว default off** → production เป็น single-pass จนกว่าจะเปิด → A/B ผ่าน eval ก่อน (เหมือน LLM-rerank)
+
+> ข้อแลก: agentic เพิ่ม 1-3 LLM call/query (latency) — เปิดเฉพาะเมื่อ eval ยืนยันว่าคุ้ม
+
+### Tool-calling agent (Phase 6)
+
+ทางเลือกที่ยืดหยุ่นกว่า fixed loop — `ENABLE_TOOL_CALLING` ให้ LLM **เลือกเครื่องมือเอง**ผ่าน function-calling:
+
+| Tool | ทำอะไร |
+|---|---|
+| `search_knowledge_base(query)` | ค้น wiki + chunks (ข้อมูลเชิงลึก) |
+| `lookup_faq(question)` | ค้น canonical QA (คำตอบสำเร็จรูป) |
+
+LLM อ่านคำถาม → ตัดสินใจเรียก tool ไหน (หรือหลายตัว) → รัน → ตอบจากผล (loop ≤ `TOOL_CALLING_MAX_STEPS`)
+- ใช้ `provider_service.chat_tools()` (function-calling + failover ข้าม provider)
+- **fail-safe**: provider ไม่รองรับ tools / 429 → fallback single-pass RAG อัตโนมัติ
+
+### LangGraph — streaming agent steps (Phase 6.3)
+
+`ENABLE_LANGGRAPH` เขียน agentic loop เป็น **LangGraph StateGraph** (`agent_graph.py`) — node: retrieve → generate → validate → (conditional) reformulate. คุณค่าหลักคือ **stream ขั้นตอนให้ผู้ใช้เห็น real-time** ผ่าน SSE:
+
+```
+🔍 กำลังค้นหาข้อมูล... → ✍️ กำลังเรียบเรียงคำตอบ... → 🔎 กำลังตรวจสอบความถูกต้อง...
+   → 🔄 ข้อมูลยังไม่ครบ กำลังค้นเพิ่ม... → 🔍 ... → คำตอบ
+```
+
+- ใช้ `graph.astream(stream_mode="updates")` → map node → label → ส่งเป็น `{"status","label"}` event → FloatingChat แสดงในฟองแชต
+- **pin `langgraph<0.3`** (เข้ากับ langchain-core 0.3.x — เลี่ยง major bump ที่ทำ langchain-text-splitters พัง)
+- fail-safe: graph error → fallback single-pass
+- ไม่เพิ่ม**คุณภาพคำตอบ** (logic เดิม) แต่เพิ่ม **UX/observability** — ผู้ใช้เห็น agent "คิด" ทีละขั้น
+
+---
+
 ## ⚡ Retrieval Latency Optimization
 
 Text search ของไทยใช้ **sliding-window substring** (mxbai แยกไทยไม่ได้ ต้องชดเชยด้วย ILIKE) เดิมยิง Supabase ทีละ window:
@@ -501,6 +557,7 @@ ENABLE_RELATIONSHIP_SEARCH=true
 | 📋 **Audit Logs** | `/audit` | 🔒 ต้องล็อกอิน | บันทึกการกระทำทั้งหมด · filter by action / company / status · paginated |
 | 🧪 **Eval** | `/eval` | 🔒 ต้องล็อกอิน | ผล Ragas evaluation (5 metrics) · per-question scores |
 | 🤖 **Providers** | `/providers` | 🔒 ต้องล็อกอิน | จัดการ AI provider + role failover chain · test · dropdown เลือก model (free/kind filter) · embed badge แสดงมิติ |
+| 📊 **Analytics** | `/analytics` | 🔒 ต้องล็อกอิน | ภาพรวมต่อ company — content/unanswered counts · latest RAG eval scores · provider + agentic status · recent activity |
 
 > **เมนูจัดเป็นหมวด dropdown:** 💬 Chat · 📚 ความรู้ (Wiki/QA/Sources/Graph) · 🔧 ระบบงาน (Jobs/Missed Q/Audit) · 🤖 AI (Providers/Eval) · 🛠️ Settings
 
@@ -523,6 +580,7 @@ Widget ถาม-ตอบแบบ SSE streaming ที่ฝังอยู่
 | 🗄️ Database | Supabase Cloud, PostgreSQL | Primary Data Store |
 | 🔍 Vector Search | pgvector + IVFFlat index | ANN Similarity Search (1024d cosine) |
 | 🔀 AI Routing | DB-backed Provider Router + auto-failover | role → provider chain (429/error → next) |
+| 🕸️ Agent Orchestration | LangGraph (StateGraph) | Agentic loop + streaming agent steps to UI |
 | 🤖 LLM (Chat/Wiki/QA/Graph) | OpenAI-compat providers: cerebras · groq · sambanova · nvidia · openrouter · **Gemini** · Ollama | Generation (failover chain) |
 | 🔢 Embeddings | **Gemini `gemini-embedding-001`** 1024d *(fallback: Ollama `mxbai-embed-large`)* | Vectorization |
 | 🕷️ Crawler 1 | Trafilatura + httpx + BeautifulSoup4 | Static HTML extraction (default) |
@@ -781,6 +839,11 @@ DAILY_CRAWL_CRON_MINUTE=0    # นาทีที่รัน
 | `ENABLE_METADATA_SEARCH` | `true` | 🏷️ Boost score ด้วย title/slug keyword matching |
 | `ENABLE_RERANKER` | `false` | 🔀 FlashRank cross-encoder reranking (English — ไม่เหมาะไทย) |
 | `ENABLE_LLM_RERANK` | `true` | 🔀 **LLM reranker** (Gemini via provider chain — Thai-capable, ใช้แทน FlashRank) |
+| `ENABLE_AGENTIC_ANSWER` | `false` | 🤖 **Agentic loop** (Phase 5) — retrieve→validate→reformulate→retry (`AGENTIC_MAX_ITERS=2`) |
+| `ENABLE_QUERY_PLANNER` | `false` | 🤖 **Query planner** (Phase 5) — route simple→single-pass, complex→agentic |
+| `GRAPHRAG_MAX_HOPS` | `1` | 🕸️ **Multi-hop GraphRAG** (Phase 5) — BFS depth (2-3 = multi-hop traversal) |
+| `ENABLE_TOOL_CALLING` | `false` | 🛠️ **Tool-calling agent** (Phase 6) — LLM เลือก retrieval tool เอง (function-calling) |
+| `ENABLE_LANGGRAPH` | `false` | 🕸️ **LangGraph** (Phase 6) — agentic loop เป็น StateGraph + stream ขั้นตอนให้ UI |
 | `ENABLE_QUERY_REWRITE` | `true` | ✏️ LLM-based query rewriting |
 | `ENABLE_GROUNDING` | `true` | 📌 Source-grounded answer generation |
 | `ENABLE_SCHEDULER` | `true` | ⏰ APScheduler daily crawl |
@@ -990,7 +1053,9 @@ enterprise-llm-wiki/
 | Phase 3.8 — Public Demo | ✅ Done | Landing page, Floating Chat widget (SSE), unanswered question tracking, Cloudflare tunnel |
 | Phase 4 — Production | ✅ Done | ~~Authentication~~ · ~~Docker hardening~~ · ~~Input validation~~ · ~~Structured logging~~ · ~~RLS per company~~ · ~~Rate limiting~~ · ~~Crawler retry~~ · ~~Job retry~~ · ~~Audit logs~~ · ~~RAG Evaluation (Ragas + failover judge)~~ · ~~Embedding upgrade (Gemini gemini-embedding-001 @1024)~~ · ~~LLM reranker (Thai-capable, via provider chain)~~ |
 | Phase 4.5 — Multi-Provider AI | ✅ Done | ~~DB-backed provider router + auto-failover chain~~ · ~~Provider UI (test/model dropdown)~~ · ~~Gemini via OpenAI-compat~~ · ~~Gemini embeddings @1024 (fix Thai vector collapse)~~ · ~~Ragas failover judge~~ |
-| Phase 5 — Agentic | 📋 Planned | LangGraph planner, multi-step retrieval, validation agent, full GraphRAG traversal |
+| Phase 5 — Agentic RAG | ✅ Done | ~~Query planner (simple↔complex routing)~~ · ~~Multi-step retrieval (retrieve→validate→reformulate loop)~~ · ~~Validation agent (LLM critic)~~ · ~~Multi-hop GraphRAG traversal (BFS)~~ — *opt-in via flags; lightweight async loop แทน LangGraph* |
+| Phase 6 — Advanced | ✅ Done | ~~Analytics dashboard (per-company stats · eval scores · provider/agentic status)~~ · ~~Tool-calling agent (function-calling)~~ · ~~LangGraph agentic graph + **streaming agent steps** to the chat UI~~ |
+| Phase 7 — Future | 📋 Planned | Human-in-the-loop approval · graph visualization/debugging · checkpoint-resumable conversations |
 
 ---
 

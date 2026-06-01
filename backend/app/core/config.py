@@ -88,7 +88,29 @@ class Settings(BaseSettings):
     ENABLE_QUERY_REWRITE: bool = False
     ENABLE_GROUNDING: bool = True
     ENABLE_RELATIONSHIP_SEARCH: bool = False
+    GRAPHRAG_MAX_HOPS: int = 1     # Phase 5.2: BFS depth for graph traversal (1 = direct neighbours only)
     ENABLE_METADATA_SEARCH: bool = True
+
+    # ── Phase 5: Agentic RAG ─────────────────────────────────────────────────
+    # Iterative retrieve → answer → validate loop. When the answer is judged
+    # insufficient, reformulate the retrieval query from the critic's feedback
+    # and try again (up to AGENTIC_MAX_ITERS). Off by default — adds 1-2 LLM
+    # calls per retry (latency cost), so A/B via eval before enabling.
+    ENABLE_AGENTIC_ANSWER: bool = False
+    AGENTIC_MAX_ITERS: int = 2
+    # Query planner — when agentic is on, classify each query (simple vs complex)
+    # and route simple factual lookups to fast single-pass, reserving the costly
+    # agentic loop for complex/multi-part questions. Lightweight alternative to a
+    # LangGraph planner that fits the existing async service architecture.
+    ENABLE_QUERY_PLANNER: bool = False
+    # Tool-calling agent (Phase 6) — the LLM picks retrieval tools (search KB /
+    # lookup FAQ) via function-calling instead of a fixed pipeline. Takes
+    # precedence over the agentic loop. Falls back to single-pass on any error.
+    ENABLE_TOOL_CALLING: bool = False
+    TOOL_CALLING_MAX_STEPS: int = 3
+    # LangGraph agentic graph (Phase 6.3) — streams intermediate steps (searching/
+    # validating/answering) to the chat UI. Used only on the streaming path.
+    ENABLE_LANGGRAPH: bool = False
 
     # =========================================
     # CRAWLER

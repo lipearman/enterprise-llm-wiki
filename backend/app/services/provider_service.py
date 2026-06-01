@@ -168,6 +168,53 @@ class ProviderService:
             # Reasoning models (gpt-oss) return {choices:[{message:{content, reasoning}}]}
             return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
 
+    # ── Tool-calling (function calling) with failover ─────────────────────────
+    async def chat_tools(
+        self, role: str, messages: list[dict], tools: list[dict],
+        *, temperature: float = 0.0, max_tokens: int = 2048,
+    ) -> dict:
+        """Chat with function-calling. Returns the assistant message dict
+        (``{content, tool_calls}``) so the caller can run any requested tools and
+        continue the loop. Fails over across providers like ``chat()``."""
+        self._ensure_loaded()
+        chain = self._by_role.get(role, [])
+        if not chain:
+            raise AllProvidersFailedError(f"no active provider for role={role}")
+        last_exc: Exception | None = None
+        for a in chain:
+            prov = a["_provider"]
+            try:
+                return await self._openai_chat_tools(
+                    prov["base_url"], prov["api_key"], a["model"],
+                    messages, tools, temperature, max_tokens,
+                )
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("provider_tools_failover | provider=%s | %s",
+                               prov.get("name"), str(exc)[:100])
+                continue
+        raise AllProvidersFailedError(f"all tool providers failed for role={role}: {last_exc}") from last_exc
+
+    @staticmethod
+    async def _openai_chat_tools(
+        base_url: str, api_key: str, model: str,
+        messages: list[dict], tools: list[dict], temperature: float, max_tokens: int,
+    ) -> dict:
+        url = base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": model, "messages": messages, "tools": tools, "tool_choice": "auto",
+            "temperature": temperature, "max_tokens": max_tokens, "stream": False,
+        }
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20, read=120, write=20, pool=20)) as client:
+            r = await client.post(
+                url, json=payload,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            )
+            if r.status_code in _FAILOVER_STATUS:
+                raise httpx.HTTPStatusError(f"status {r.status_code}", request=r.request, response=r)
+            r.raise_for_status()
+            return (r.json().get("choices") or [{}])[0].get("message", {}) or {}
+
     # ── Embeddings (single provider + transient retry) ─────────────────────────
     _EMBED_RETRIES = 3          # attempts per provider on transient errors
     _EMBED_BACKOFF = 1.5        # seconds, exponential

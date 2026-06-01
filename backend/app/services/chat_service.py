@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from datetime import datetime, timedelta
@@ -328,13 +329,22 @@ class ChatService:
                 )
 
         # ── RAG — retrieval_q (enriched) for embedding, original for LLM ──
-        context_rows = await retrieval_service.search_context(retrieval_q, company_code)
-
-        context = self._build_context(context_rows)
         # Use the original question in the LLM prompt so history from
         # the previous turn does not distort what the model answers.
         try:
-            answer = await self._generate_answer(self._coerce_to_question(question), context, history)
+            use_agentic = settings.ENABLE_AGENTIC_ANSWER
+            # Planner: route simple factual queries to fast single-pass, reserve
+            # the agentic loop for complex/multi-part questions.
+            if use_agentic and settings.ENABLE_QUERY_PLANNER:
+                use_agentic = (await self._plan_query(question)) == "complex"
+            if settings.ENABLE_TOOL_CALLING:
+                answer, context_rows = await self._tool_calling_answer(question, company_code, history)
+            elif use_agentic:
+                answer, context_rows = await self._agentic_rag(question, retrieval_q, company_code, history)
+            else:
+                context_rows = await retrieval_service.search_context(retrieval_q, company_code)
+                context = self._build_context(context_rows)
+                answer = await self._generate_answer(self._coerce_to_question(question), context, history)
         except Exception as exc:
             logger.error("llm_generate_error | %s: %s", type(exc).__name__, exc)
             return ChatResponse(
@@ -630,14 +640,24 @@ class ChatService:
 
             # ── RAG — retrieval_q (enriched) for embedding, original for LLM
             yield {"status": "thinking"}
-            context_rows = await retrieval_service.search_context(retrieval_q, company_code)
-
-            context = self._build_context(context_rows)
-
-            full_answer = ""
-            async for token in self._generate_answer_stream(self._coerce_to_question(question), context, history):
-                full_answer += token
-                yield {"token": token}
+            if settings.ENABLE_LANGGRAPH:
+                # LangGraph agentic graph — stream each step's status to the UI.
+                from app.services.agent_graph import agent_graph_stream
+                full_answer = ""
+                async for ev in agent_graph_stream(self, question, retrieval_q, company_code, history):
+                    if "answer" in ev:                       # final event
+                        full_answer = ev["answer"]
+                        context_rows = ev["context_rows"]
+                        yield {"token": full_answer}
+                    else:                                    # {"status","label"} step event
+                        yield ev
+            else:
+                context_rows = await retrieval_service.search_context(retrieval_q, company_code)
+                context = self._build_context(context_rows)
+                full_answer = ""
+                async for token in self._generate_answer_stream(self._coerce_to_question(question), context, history):
+                    full_answer += token
+                    yield {"token": token}
 
         except Exception as exc:
             logger.error("stream:pipeline_error | %s: %s", type(exc).__name__, exc, exc_info=True)
@@ -688,6 +708,170 @@ class ChatService:
         )
         answer = await self._generate_answer(question, context, history)
         yield answer
+
+    # ── Phase 6: Tool-calling agent ──────────────────────────────────────────
+    _TOOLS = [
+        {"type": "function", "function": {
+            "name": "search_knowledge_base",
+            "description": "ค้นหาข้อมูลรายละเอียดจากฐานความรู้ของบริษัทด้วยคำค้น (wiki + เอกสาร). ใช้กับคำถามที่ต้องการข้อมูลเชิงลึกหรือเฉพาะเจาะจง",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "คำค้นภาษาไทยที่อธิบายสิ่งที่ต้องการหา"}}, "required": ["query"]},
+        }},
+        {"type": "function", "function": {
+            "name": "lookup_faq",
+            "description": "ค้นคำถาม-คำตอบที่พบบ่อย (FAQ) ที่ตรงกับคำถาม. ใช้กับคำถามทั่วไปที่น่าจะมีคำตอบสำเร็จรูป",
+            "parameters": {"type": "object", "properties": {
+                "question": {"type": "string", "description": "คำถามของผู้ใช้"}}, "required": ["question"]},
+        }},
+    ]
+
+    async def _exec_tool(self, name: str, args: dict, company_code: str) -> tuple[str, list[dict]]:
+        """Run a tool the agent requested. Returns (text_for_llm, context_rows)."""
+        try:
+            if name == "search_knowledge_base":
+                rows = await retrieval_service.search_context(args.get("query", "") or "", company_code)
+                return (self._build_context(rows)[:4000] or "ไม่พบข้อมูล"), rows
+            if name == "lookup_faq":
+                qa = await retrieval_service.match_canonical_qa(args.get("question", "") or "", company_code)
+                if qa:
+                    return f"FAQ ที่ตรง: {qa.get('answer', '')}", []
+                return "ไม่พบ FAQ ที่ตรงกับคำถามนี้", []
+        except Exception as exc:
+            logger.warning("exec_tool | %s failed: %s", name, str(exc)[:80])
+        return f"เครื่องมือ {name} ใช้ไม่ได้", []
+
+    async def _tool_calling_answer(
+        self, question: str, company_code: str, history: list[dict],
+    ) -> tuple[str, list[dict]]:
+        """Phase 6 — the LLM chooses retrieval tools via function-calling, runs
+        them, then answers from the gathered context. Falls back to single-pass
+        RAG on any failure (provider lacks tool support, rate-limit, …)."""
+        sys_msg = (
+            "คุณเป็นผู้ช่วยข้อมูลของบริษัท ใช้เครื่องมือค้นหาข้อมูลก่อนตอบเสมอ "
+            "แล้วตอบเป็นภาษาไทยจากผลที่ค้นได้เท่านั้น ห้ามแต่งข้อมูลเอง ตอบกระชับ ตรงคำถาม"
+        )
+        messages: list[dict] = [{"role": "system", "content": sys_msg}, *history,
+                                {"role": "user", "content": question}]
+        collected: list[dict] = []
+        try:
+            for _ in range(max(1, settings.TOOL_CALLING_MAX_STEPS)):
+                msg = await provider_service.chat_tools("answer_llm", messages, self._TOOLS, max_tokens=1500)
+                tool_calls = msg.get("tool_calls") or []
+                if not tool_calls:
+                    return (msg.get("content") or ""), collected
+                messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls})
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except Exception:
+                        args = {}
+                    result, rows = await self._exec_tool(fn.get("name", ""), args, company_code)
+                    collected.extend(rows)
+                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result})
+                logger.info("tool_calling | step done | tools=%s", [t.get("function", {}).get("name") for t in tool_calls])
+            # Out of steps — force a final answer without more tools
+            final = await provider_service.chat("answer_llm", messages, max_tokens=1500)
+            return final, collected
+        except Exception as exc:
+            logger.warning("tool_calling | fallback to single-pass | %s", str(exc)[:100])
+            rows = await retrieval_service.search_context(question, company_code)
+            context = self._build_context(rows)
+            answer = await self._generate_answer(self._coerce_to_question(question), context, history)
+            return answer, rows
+
+    # ── Phase 5: Agentic RAG loop ────────────────────────────────────────────
+    async def _plan_query(self, question: str) -> str:
+        """Lightweight query planner (Phase 5.3) — classify the retrieval
+        strategy. Returns 'simple' (single-pass is enough) or 'complex' (worth
+        the agentic multi-step loop). Fails toward 'complex' (more thorough)."""
+        prompt = (
+            f"คำถาม: {question}\n\n"
+            "จัดประเภทคำถามนี้ ตอบคำเดียว:\n"
+            "- simple = ถามข้อเท็จจริงเดียว ตรงไปตรงมา (เช่น ทุนจดทะเบียน, ที่อยู่, เบอร์โทร, ปีก่อตั้ง)\n"
+            "- complex = ถามหลายส่วน / ต้องเชื่อมโยงหรือเปรียบเทียบข้อมูล / ขั้นตอนซับซ้อน\n"
+            "ตอบเฉพาะคำว่า simple หรือ complex"
+        )
+        try:
+            out = await provider_service.chat(
+                "answer_llm", [{"role": "user", "content": prompt}], temperature=0.0, max_tokens=10,
+            )
+            plan = "complex" if "complex" in out.lower() else "simple"
+            logger.info("query_planner | %s | q=%r", plan, question[:50])
+            return plan
+        except Exception:
+            return "complex"
+
+    async def _agentic_rag(
+        self, question: str, retrieval_q: str, company_code: str, history: list[dict],
+    ) -> tuple[str, list[dict]]:
+        """Iterative retrieve → answer → validate loop.
+
+        On an insufficient answer, reformulate the retrieval query from the
+        critic's feedback and retry (up to AGENTIC_MAX_ITERS). Returns the final
+        (answer, context_rows). Degrades to single-pass if the LLM critic fails."""
+        q = retrieval_q
+        answer, context_rows = "", []
+        max_iters = max(1, settings.AGENTIC_MAX_ITERS)
+        for i in range(max_iters):
+            context_rows = await retrieval_service.search_context(q, company_code)
+            context = self._build_context(context_rows)
+            answer = await self._generate_answer(self._coerce_to_question(question), context, history)
+            if i == max_iters - 1:
+                break                                   # last pass — no point validating
+            verdict = await self._validate_answer(question, answer, context)
+            if verdict["sufficient"]:
+                logger.info("agentic_rag | sufficient at iter=%d", i)
+                break
+            new_q = await self._reformulate_query(question, verdict.get("missing", ""), q)
+            if not new_q or new_q == q:
+                break                                   # no new direction → stop
+            logger.info("agentic_rag | retry iter=%d | missing=%r | new_q=%r",
+                        i, verdict.get("missing", "")[:50], new_q[:50])
+            q = new_q
+        return answer, context_rows
+
+    async def _validate_answer(self, question: str, answer: str, context: str) -> dict:
+        """LLM critic: is the answer grounded in CONTEXT and complete?
+        Returns {"sufficient": bool, "missing": str}. Fails open (sufficient) so
+        a critic outage never traps the loop."""
+        if self._is_no_answer_text(answer):
+            return {"sufficient": False, "missing": question}
+        prompt = (
+            f"คำถาม: {question}\n\nคำตอบที่ได้: {answer}\n\nCONTEXT ที่ใช้:\n{context[:4000]}\n\n"
+            "ประเมินว่าคำตอบนี้ (1) อ้างอิงจาก CONTEXT จริง และ (2) ตอบคำถามได้ครบถ้วนหรือไม่\n"
+            'ตอบ JSON เท่านั้น: {"sufficient": true หรือ false, '
+            '"missing": "ข้อมูลที่ยังขาดและควรค้นเพิ่ม (ถ้า sufficient=true เว้นว่าง)"}'
+        )
+        try:
+            out = await provider_service.chat(
+                "answer_llm", [{"role": "user", "content": prompt}], temperature=0.0, max_tokens=300,
+            )
+            a, b = out.find("{"), out.rfind("}")
+            data = json.loads(out[a:b + 1])
+            return {"sufficient": bool(data.get("sufficient", True)),
+                    "missing": str(data.get("missing", "")).strip()}
+        except Exception as exc:
+            logger.warning("validate_answer | skipped: %s", str(exc)[:80])
+            return {"sufficient": True, "missing": ""}
+
+    async def _reformulate_query(self, question: str, missing: str, prev_q: str) -> str:
+        """Write a new Thai search query aimed at the gap the critic identified."""
+        if not missing:
+            return prev_q
+        prompt = (
+            f"คำถามเดิม: {question}\nค้นแล้วยังขาดข้อมูล: {missing}\n\n"
+            "เขียนคำค้น (search query) ภาษาไทยใหม่ 1 บรรทัด ที่จะช่วยดึงข้อมูลส่วนที่ขาดมา "
+            "ตอบเฉพาะคำค้น ไม่ต้องอธิบาย ไม่ต้องใส่เครื่องหมายคำพูด"
+        )
+        try:
+            out = await provider_service.chat(
+                "answer_llm", [{"role": "user", "content": prompt}], temperature=0.0, max_tokens=80,
+            )
+            new_q = out.strip().strip('"').splitlines()[0].strip() if out.strip() else ""
+            return new_q or prev_q
+        except Exception:
+            return prev_q
 
     async def _generate_answer(
         self,
