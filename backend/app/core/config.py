@@ -111,6 +111,15 @@ class Settings(BaseSettings):
     # LangGraph agentic graph (Phase 6.3) — streams intermediate steps (searching/
     # validating/answering) to the chat UI. Used only on the streaming path.
     ENABLE_LANGGRAPH: bool = False
+    # Human-in-the-loop review queue (Phase 7) — auto-generated wiki pages and
+    # canonical QA land in a "pending review" state (wiki status=pending_review,
+    # QA is_active=false) instead of going live. An editor approves/rejects them
+    # on /review. Retrieval only serves published wiki + active QA, so pending
+    # content is never shown to users.
+    ENABLE_REVIEW_QUEUE: bool = False
+    # Multi-step claim intake (Phase 7) — guided, resumable "file a claim" flow
+    # with state checkpointed per session (claim_intakes table; in-memory fallback).
+    ENABLE_CLAIM_INTAKE: bool = False
 
     # =========================================
     # CRAWLER

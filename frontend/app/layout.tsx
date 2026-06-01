@@ -30,6 +30,7 @@ const NAV: NavNode[] = [
     label: "🔧 ระบบงาน",
     children: [
       { href: "/jobs",       label: "⚙️ Jobs" },
+      { href: "/review",     label: "✅ Review Queue" },
       { href: "/unanswered", label: "📭 Missed Questions" },
       { href: "/audit",      label: "📋 Audit Log" },
     ],

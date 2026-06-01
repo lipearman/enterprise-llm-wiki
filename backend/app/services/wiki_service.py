@@ -36,7 +36,8 @@ SOURCE_URLS: {source_urls}
             "content_markdown": md,
             "source_urls": source_urls,
             "embedding": emb,
-            "status": "published",
+            # HITL review queue: hold for editor approval instead of going live.
+            "status": "pending_review" if settings.ENABLE_REVIEW_QUEUE else "published",
             "version": 1,
         }
         # Auto-increment version if slug already exists for this company

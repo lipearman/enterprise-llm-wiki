@@ -262,6 +262,14 @@ class ChatService:
         # Load conversation history for this session (empty list if no session)
         history = session_store.get(session_id) if session_id else []
 
+        # ── Claim intake (multi-step, checkpointed per session) ───────────
+        if settings.ENABLE_CLAIM_INTAKE and session_id and not force_rag:
+            from app.services.claim_service import claim_service
+            if claim_service.active(session_id) or claim_service.is_claim_intent(question):
+                reply = claim_service.advance(session_id, company_code, question)
+                session_store.save(session_id, question, reply)
+                return ChatResponse(answer=reply, mode="claim_intake", cached=False, sources=[])
+
         # ── Greeting fast-path ────────────────────────────────────────────
         if not force_rag and _is_greeting(question):
             logger.info("greeting_detected | q=%r", question[:40])

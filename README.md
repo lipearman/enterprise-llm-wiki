@@ -435,6 +435,15 @@ LLM อ่านคำถาม → ตัดสินใจเรียก tool
 - fail-safe: graph error → fallback single-pass
 - ไม่เพิ่ม**คุณภาพคำตอบ** (logic เดิม) แต่เพิ่ม **UX/observability** — ผู้ใช้เห็น agent "คิด" ทีละขั้น
 
+### Human-in-the-loop & Checkpointing (Phase 7)
+
+| Feature | คือ |
+|---|---|
+| **Review queue** (`ENABLE_REVIEW_QUEUE`) | wiki/QA ที่ AI สร้าง → `status=pending_review` / `is_active=false` (retrieval **ไม่ serve**) → editor approve/reject ที่ `/review` → publish เมื่ออนุมัติ. กัน KB เผยแพร่ข้อมูลผิดอัตโนมัติ |
+| **Claim intake** (`ENABLE_CLAIM_INTAKE`) | flow แจ้งเคลมหลายขั้น: "แจ้งเคลม" → เลขกรมธรรม์ → ข้อมูลรถ → เหตุการณ์ → สรุป+เลขอ้างอิง. **state checkpoint ต่อ session** (`claim_intakes` table; in-memory fallback) → ลูกค้าหลุดกลางคันแล้วกลับมาทำต่อได้ |
+
+> Review queue **retrieval-safe by construction**: pending content อยู่ในตาราง live แต่ query กรอง `status=published` / `is_active=true` ออก → ผู้ใช้ไม่มีวันเห็นจนกว่าจะ approve
+
 ---
 
 ## ⚡ Retrieval Latency Optimization
@@ -557,7 +566,8 @@ ENABLE_RELATIONSHIP_SEARCH=true
 | 📋 **Audit Logs** | `/audit` | 🔒 ต้องล็อกอิน | บันทึกการกระทำทั้งหมด · filter by action / company / status · paginated |
 | 🧪 **Eval** | `/eval` | 🔒 ต้องล็อกอิน | ผล Ragas evaluation (5 metrics) · per-question scores |
 | 🤖 **Providers** | `/providers` | 🔒 ต้องล็อกอิน | จัดการ AI provider + role failover chain · test · dropdown เลือก model (free/kind filter) · embed badge แสดงมิติ |
-| 📊 **Analytics** | `/analytics` | 🔒 ต้องล็อกอิน | ภาพรวมต่อ company — content/unanswered counts · latest RAG eval scores · provider + agentic status · recent activity |
+| 📊 **Analytics** | `/analytics` | 🔒 ต้องล็อกอิน | ภาพรวมต่อ company — content/unanswered counts · latest RAG eval scores · provider + agentic status · **agent graph viz** · recent activity |
+| ✅ **Review Queue** | `/review` | 🔒 ต้องล็อกอิน | **HITL** — อนุมัติ/ปฏิเสธ wiki + QA ที่ AI สร้างก่อนเผยแพร่ (pending ไม่ถูก serve จน approve) |
 
 > **เมนูจัดเป็นหมวด dropdown:** 💬 Chat · 📚 ความรู้ (Wiki/QA/Sources/Graph) · 🔧 ระบบงาน (Jobs/Missed Q/Audit) · 🤖 AI (Providers/Eval) · 🛠️ Settings
 
@@ -651,6 +661,7 @@ backend/sql/003_rpc.sql                  ← สร้าง RPC functions ส�
 backend/sql/007_unanswered_questions.sql ← สร้าง unanswered_questions table
 backend/sql/009_audit_logs.sql          ← สร้าง audit_logs table
 backend/sql/010_ai_providers.sql        ← สร้าง ai_providers + ai_role_assignments (multi-provider failover)
+backend/sql/011_claim_intakes.sql       ← (optional) claim intake checkpoint table (Phase 7 — in-memory fallback ถ้าไม่รัน)
 ```
 
 > หลังรัน `010` แล้ว seed provider + chain ผ่านหน้า `/providers` (หรือ `scripts/seed_providers.py` + env keys) — ระบบจะ fallback ไป `.env`/local เองถ้ายังไม่ตั้ง
@@ -844,6 +855,8 @@ DAILY_CRAWL_CRON_MINUTE=0    # นาทีที่รัน
 | `GRAPHRAG_MAX_HOPS` | `1` | 🕸️ **Multi-hop GraphRAG** (Phase 5) — BFS depth (2-3 = multi-hop traversal) |
 | `ENABLE_TOOL_CALLING` | `false` | 🛠️ **Tool-calling agent** (Phase 6) — LLM เลือก retrieval tool เอง (function-calling) |
 | `ENABLE_LANGGRAPH` | `false` | 🕸️ **LangGraph** (Phase 6) — agentic loop เป็น StateGraph + stream ขั้นตอนให้ UI |
+| `ENABLE_REVIEW_QUEUE` | `false` | ✅ **HITL review** (Phase 7) — wiki/QA ที่ AI สร้าง → pending รอ editor อนุมัติที่ `/review` ก่อน publish |
+| `ENABLE_CLAIM_INTAKE` | `false` | 📋 **Claim intake** (Phase 7) — flow แจ้งเคลมหลายขั้น resumable (checkpoint per session) |
 | `ENABLE_QUERY_REWRITE` | `true` | ✏️ LLM-based query rewriting |
 | `ENABLE_GROUNDING` | `true` | 📌 Source-grounded answer generation |
 | `ENABLE_SCHEDULER` | `true` | ⏰ APScheduler daily crawl |
@@ -1055,7 +1068,7 @@ enterprise-llm-wiki/
 | Phase 4.5 — Multi-Provider AI | ✅ Done | ~~DB-backed provider router + auto-failover chain~~ · ~~Provider UI (test/model dropdown)~~ · ~~Gemini via OpenAI-compat~~ · ~~Gemini embeddings @1024 (fix Thai vector collapse)~~ · ~~Ragas failover judge~~ |
 | Phase 5 — Agentic RAG | ✅ Done | ~~Query planner (simple↔complex routing)~~ · ~~Multi-step retrieval (retrieve→validate→reformulate loop)~~ · ~~Validation agent (LLM critic)~~ · ~~Multi-hop GraphRAG traversal (BFS)~~ — *opt-in via flags; lightweight async loop แทน LangGraph* |
 | Phase 6 — Advanced | ✅ Done | ~~Analytics dashboard (per-company stats · eval scores · provider/agentic status)~~ · ~~Tool-calling agent (function-calling)~~ · ~~LangGraph agentic graph + **streaming agent steps** to the chat UI~~ |
-| Phase 7 — Observability & Control | 🚧 In progress | ~~Agent graph visualization (nodes/edges/Mermaid on dashboard)~~ · Human-in-the-loop approval *(planned)* · checkpoint-resumable conversations *(planned)* |
+| Phase 7 — Observability & Control | ✅ Done | ~~Agent graph visualization~~ · ~~HITL review queue (approve AI wiki/QA before publish)~~ · ~~Checkpoint-resumable multi-step claim intake~~ |
 
 ---
 

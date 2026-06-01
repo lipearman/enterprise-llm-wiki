@@ -173,6 +173,8 @@ class RetrievalService:
                     "match_count": settings.RETRIEVAL_TOP_K,
                 }).execute()
                 wiki_rows = res.data or []
+                # HITL review queue: never serve wiki pages awaiting approval.
+                wiki_rows = [x for x in wiki_rows if (x.get("status") or "published") == "published"]
                 rows.extend([{**x, "source_type": "wiki"} for x in wiki_rows])
                 logger.debug("vector_search_wiki | found=%d | company=%s", len(wiki_rows), company_code)
             except Exception as exc:
@@ -521,7 +523,7 @@ class RetrievalService:
             for row in (
                 supabase.table("wiki_pages")
                 .select("id,title,slug,content_markdown,source_urls")
-                .eq("company_code", company_code)
+                .eq("company_code", company_code).eq("status", "published")
                 .or_(title_or).limit(30).execute().data or []
             ):
                 _add_row(row, title_hit=True)
@@ -530,7 +532,7 @@ class RetrievalService:
             for row in (
                 supabase.table("wiki_pages")
                 .select("id,title,slug,content_markdown,source_urls")
-                .eq("company_code", company_code)
+                .eq("company_code", company_code).eq("status", "published")
                 .or_(content_or).limit(30).execute().data or []
             ):
                 _add_row(row, title_hit=False)

@@ -44,7 +44,8 @@ WIKI:
                 "answer": a,
                 "priority": int(item.get("priority", 100)),
                 "embedding": emb,
-                "is_active": True,
+                # HITL review queue: inactive (pending) until an editor approves.
+                "is_active": not settings.ENABLE_REVIEW_QUEUE,
             }
             res = supabase.table("canonical_qa").insert(row).execute()
             saved.append(res.data[0] if res.data else row)
