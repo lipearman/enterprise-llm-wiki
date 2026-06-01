@@ -318,7 +318,7 @@ class RetrievalService:
             out = await provider_service.chat(
                 "answer_llm",
                 [{"role": "system", "content": sys_msg}, {"role": "user", "content": user_msg}],
-                temperature=0.0, max_tokens=200,
+                temperature=0.0, max_tokens=800,  # gpt-oss reasoning needs headroom or returns empty content
             )
             a, b = out.find("["), out.rfind("]")
             order = json.loads(out[a:b + 1]) if (a >= 0 and b > a) else []

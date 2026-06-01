@@ -12,10 +12,11 @@ import json
 import logging
 import os
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 
 from app.db.supabase_client import supabase
 from app.core.config import settings
+from app.services.audit_service import audit_log
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,31 @@ def agent_graph():
         logger.warning("agent_graph_introspect_failed | %s", str(exc)[:100])
         return {"enabled": settings.ENABLE_LANGGRAPH, "available": False,
                 "error": str(exc)[:120], "nodes": [], "edges": []}
+
+
+@router.get("/agent-runs")
+def agent_runs(limit: int = Query(25, ge=1, le=200), company_code: str | None = Query(None),
+               search: str | None = Query(None)):
+    """Phase 7 — recent agentic runs with the node-by-node step trace, for the
+    observability view. Persisted in agent_runs (in-memory fallback). Supports
+    ``search`` (question contains)."""
+    try:
+        from app.services.agent_graph import get_recent_runs, get_run_stats
+        return {"enabled": settings.ENABLE_LANGGRAPH,
+                "stats": get_run_stats(company_code),
+                "runs": get_recent_runs(limit, company_code, search)}
+    except Exception as exc:
+        logger.warning("agent_runs_failed | %s", str(exc)[:100])
+        return {"enabled": settings.ENABLE_LANGGRAPH, "runs": [], "stats": {}, "error": str(exc)[:120]}
+
+
+@router.delete("/agent-runs")
+def purge_agent_runs(request: Request, older_than_days: int = Query(30, ge=0, le=3650)):
+    """Retention — delete agent runs older than ``older_than_days``."""
+    from app.services.agent_graph import purge_old_runs
+    removed = purge_old_runs(older_than_days)
+    audit_log("analytics.purge_runs", request=request, detail={"older_than_days": older_than_days, "removed": removed})
+    return {"ok": True, "removed": removed, "older_than_days": older_than_days}
 
 
 @router.get("/overview")

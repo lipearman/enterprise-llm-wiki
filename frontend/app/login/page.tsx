@@ -26,7 +26,7 @@ export default function LoginPage() {
 
       if (res.ok) {
         setToken(apiKey.trim());
-        router.replace("/chat");
+        router.replace("/analytics");
       } else {
         const data = await res.json().catch(() => ({}));
         setError(data.detail || "API key ไม่ถูกต้อง");

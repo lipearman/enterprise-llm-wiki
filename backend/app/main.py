@@ -20,6 +20,7 @@ from app.api.audit import router as audit_router
 from app.api.providers import router as providers_router
 from app.api.analytics import router as analytics_router
 from app.api.review import router as review_router
+from app.api.claims import router as claims_router
 
 
 # ── Startup validation ────────────────────────────────────────────────────────
@@ -137,6 +138,7 @@ app.include_router(audit_router)
 app.include_router(providers_router)
 app.include_router(analytics_router)
 app.include_router(review_router)
+app.include_router(claims_router)
 
 
 @app.get("/")

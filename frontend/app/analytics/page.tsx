@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
-import { LayoutDashboard, FileText, MessageSquareOff, Cpu, FlaskConical, ScrollText, RefreshCw, Workflow, ArrowRight, RotateCcw } from "lucide-react";
+import { LayoutDashboard, FileText, MessageSquareOff, Cpu, FlaskConical, ScrollText, RefreshCw, Workflow, ArrowRight, RotateCcw, Trash2 } from "lucide-react";
 
 interface Overview {
   company_code: string;
@@ -53,6 +53,22 @@ interface AgentGraph {
   edges: { source: string; target: string; conditional: boolean }[];
 }
 
+interface AgentRun {
+  question: string;
+  at: string;
+  duration: number;
+  iterations: number;
+  steps: { node: string; label: string; t: number }[];
+  answer_preview: string;
+}
+
+interface RunStats {
+  count: number;
+  avg_duration: number;
+  avg_iterations: number;
+  reformulate_pct: number;
+}
+
 const NODE_META: Record<string, { label: string; icon: string }> = {
   __start__:   { label: "เริ่ม", icon: "▶️" },
   retrieve:    { label: "ค้นหาข้อมูล", icon: "🔍" },
@@ -65,7 +81,17 @@ const NODE_META: Record<string, { label: string; icon: string }> = {
 export default function AnalyticsPage() {
   const [data, setData] = useState<Overview | null>(null);
   const [graph, setGraph] = useState<AgentGraph | null>(null);
+  const [runs, setRuns] = useState<AgentRun[]>([]);
+  const [runStats, setRunStats] = useState<RunStats | null>(null);
+  const [runSearch, setRunSearch] = useState("");
+  const [retentionDays, setRetentionDays] = useState(30);
   const [loading, setLoading] = useState(true);
+
+  const loadRuns = useCallback(async (search: string) => {
+    const r = await apiFetch(`/api/analytics/agent-runs?limit=50${search ? `&search=${encodeURIComponent(search)}` : ""}`)
+      .then(r => r.json()).catch(() => null);
+    setRuns(r?.runs ?? []); setRunStats(r?.stats ?? null);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -75,9 +101,17 @@ export default function AnalyticsPage() {
         apiFetch("/api/analytics/agent-graph").then(r => r.json()).catch(() => null),
       ]);
       setData(ov); setGraph(gr);
+      await loadRuns("");
     } finally { setLoading(false); }
-  }, []);
+  }, [loadRuns]);
   useEffect(() => { load(); }, [load]);
+
+  const purgeRuns = async () => {
+    if (!confirm(`ลบ run ที่เก่ากว่า ${retentionDays} วัน?`)) return;
+    const r = await apiFetch(`/api/analytics/agent-runs?older_than_days=${retentionDays}`, { method: "DELETE" }).then(r => r.json());
+    alert(`ลบไป ${r.removed} รายการ`);
+    loadRuns(runSearch);
+  };
 
   return (
     <div className="space-y-6">
@@ -196,6 +230,70 @@ export default function AnalyticsPage() {
                 </div>
               )}
               <p className="text-[11px] text-slate-400 mt-2">{graph.nodes.length} nodes · {graph.edges.length} edges {graph.edges.some(e => e.conditional) ? `· ${graph.edges.filter(e => e.conditional).length} conditional` : ""}</p>
+            </div>
+          )}
+
+          {/* Recent agent runs (Phase 7) */}
+          {(runs.length > 0 || runSearch) && (
+            <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
+              <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+                <h2 className="text-sm font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1.5"><Workflow size={14} /> Recent Agent Runs</h2>
+                <div className="flex items-center gap-2">
+                  <input value={runSearch} onChange={e => setRunSearch(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && loadRuns(runSearch)}
+                    placeholder="ค้นหาคำถาม…"
+                    className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 w-36" />
+                  <button onClick={() => loadRuns(runSearch)} className="px-2.5 py-1.5 rounded-lg bg-indigo-600 text-white text-xs hover:bg-indigo-700">ค้นหา</button>
+                </div>
+              </div>
+
+              {/* stats */}
+              {runStats && runStats.count > 0 && (
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {[
+                    ["จำนวน run", `${runStats.count}`],
+                    ["เฉลี่ย/run", `${runStats.avg_duration}s`],
+                    ["เฉลี่ยรอบ", `${runStats.avg_iterations}`],
+                    ["ต้อง reformulate", `${runStats.reformulate_pct}%`],
+                  ].map(([label, val]) => (
+                    <div key={label} className="rounded-xl bg-slate-50 dark:bg-slate-800 px-3 py-1.5">
+                      <div className="text-[10px] text-slate-400">{label}</div>
+                      <div className="text-sm font-bold text-slate-800 dark:text-white">{val}</div>
+                    </div>
+                  ))}
+                  {/* retention */}
+                  <div className="rounded-xl bg-slate-50 dark:bg-slate-800 px-3 py-1.5 flex items-center gap-1.5 ml-auto">
+                    <span className="text-[10px] text-slate-400">ลบเก่ากว่า</span>
+                    <input type="number" value={retentionDays} min={0} onChange={e => setRetentionDays(Number(e.target.value))}
+                      className="w-12 rounded border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-xs px-1 py-0.5 text-center" />
+                    <span className="text-[10px] text-slate-400">วัน</span>
+                    <button onClick={purgeRuns} className="ml-1 p-1 rounded text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 hover:text-rose-600" title="ลบ run เก่า"><Trash2 size={13} /></button>
+                  </div>
+                </div>
+              )}
+
+              {runs.length === 0 ? <p className="text-xs text-slate-400">ไม่พบ run ที่ตรงคำค้น</p> : (
+              <div className="space-y-3">
+                {runs.map((r, i) => (
+                  <div key={i} className="border-b border-slate-100 dark:border-slate-800 last:border-0 pb-3 last:pb-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm text-slate-700 dark:text-slate-200 truncate">💬 {r.question}</span>
+                      <span className="text-[11px] text-slate-400 shrink-0 whitespace-nowrap">{r.at?.slice(11, 19)} · {r.duration}s · {r.iterations} รอบ</span>
+                    </div>
+                    {/* step trace */}
+                    <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                      {r.steps.map((s, j) => (
+                        <span key={j} className="flex items-center gap-1">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 whitespace-nowrap" title={`${s.t}s`}>{s.label}</span>
+                          {j < r.steps.length - 1 && <span className="text-slate-300 dark:text-slate-600 text-[10px]">→</span>}
+                        </span>
+                      ))}
+                    </div>
+                    {r.answer_preview && <p className="text-[11px] text-slate-400 mt-1 truncate">→ {r.answer_preview}</p>}
+                  </div>
+                ))}
+              </div>
+              )}
             </div>
           )}
         </>

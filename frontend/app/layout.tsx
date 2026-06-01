@@ -31,6 +31,7 @@ const NAV: NavNode[] = [
     children: [
       { href: "/jobs",       label: "⚙️ Jobs" },
       { href: "/review",     label: "✅ Review Queue" },
+      { href: "/claims",     label: "🚗 Claims" },
       { href: "/unanswered", label: "📭 Missed Questions" },
       { href: "/audit",      label: "📋 Audit Log" },
     ],

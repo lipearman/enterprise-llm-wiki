@@ -608,6 +608,16 @@ class ChatService:
             yield {"done": True, "sources": []}
             return
 
+        # ── Claim intake (multi-step, checkpointed per session) ───────────
+        if settings.ENABLE_CLAIM_INTAKE and session_id and not force_rag:
+            from app.services.claim_service import claim_service
+            if claim_service.active(session_id) or claim_service.is_claim_intent(question):
+                reply = claim_service.advance(session_id, company_code, question)
+                session_store.save(session_id, question, reply)
+                yield {"token": reply}
+                yield {"done": True, "sources": []}
+                return
+
         try:
             # ── Python-level ambiguity check (BEFORE cache — always deterministic) ──
             # Must run first so ambiguous keywords always trigger the predefined
