@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
-import { LayoutDashboard, FileText, MessageSquareOff, Cpu, FlaskConical, ScrollText, RefreshCw } from "lucide-react";
+import { LayoutDashboard, FileText, MessageSquareOff, Cpu, FlaskConical, ScrollText, RefreshCw, Workflow, ArrowRight, RotateCcw } from "lucide-react";
 
 interface Overview {
   company_code: string;
@@ -46,14 +46,36 @@ function bar(v: number | null) {
   );
 }
 
+interface AgentGraph {
+  enabled: boolean;
+  available: boolean;
+  nodes: string[];
+  edges: { source: string; target: string; conditional: boolean }[];
+}
+
+const NODE_META: Record<string, { label: string; icon: string }> = {
+  __start__:   { label: "เริ่ม", icon: "▶️" },
+  retrieve:    { label: "ค้นหาข้อมูล", icon: "🔍" },
+  generate:    { label: "เรียบเรียงคำตอบ", icon: "✍️" },
+  validate:    { label: "ตรวจสอบ", icon: "🔎" },
+  reformulate: { label: "ค้นเพิ่มเติม", icon: "🔄" },
+  __end__:     { label: "ตอบ", icon: "🏁" },
+};
+
 export default function AnalyticsPage() {
   const [data, setData] = useState<Overview | null>(null);
+  const [graph, setGraph] = useState<AgentGraph | null>(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { setData(await apiFetch("/api/analytics/overview").then(r => r.json())); }
-    finally { setLoading(false); }
+    try {
+      const [ov, gr] = await Promise.all([
+        apiFetch("/api/analytics/overview").then(r => r.json()),
+        apiFetch("/api/analytics/agent-graph").then(r => r.json()).catch(() => null),
+      ]);
+      setData(ov); setGraph(gr);
+    } finally { setLoading(false); }
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -143,6 +165,37 @@ export default function AnalyticsPage() {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Agent graph (Phase 7) */}
+          {graph && graph.available && (
+            <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
+              <h2 className="text-sm font-bold text-slate-700 dark:text-slate-200 mb-3 flex items-center gap-1.5">
+                <Workflow size={14} /> Agent Graph (LangGraph)
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${graph.enabled ? "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300" : "bg-slate-100 dark:bg-slate-800 text-slate-400"}`}>{graph.enabled ? "ACTIVE" : "OFF"}</span>
+              </h2>
+              {/* main pipeline */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {["__start__", "retrieve", "generate", "validate", "__end__"]
+                  .filter(n => graph.nodes.includes(n))
+                  .map((n, i, arr) => (
+                    <span key={n} className="flex items-center gap-1.5">
+                      <span className="px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap">
+                        {NODE_META[n]?.icon} {NODE_META[n]?.label ?? n}
+                      </span>
+                      {i < arr.length - 1 && <ArrowRight size={14} className="text-slate-400 shrink-0" />}
+                    </span>
+                  ))}
+              </div>
+              {/* conditional loop */}
+              {graph.nodes.includes("reformulate") && (
+                <div className="mt-3 flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-lg px-3 py-2">
+                  <RotateCcw size={13} className="shrink-0" />
+                  <span>เงื่อนไข: ถ้า <b>ตรวจสอบ</b> แล้วข้อมูลไม่ครบ → <b>{NODE_META.reformulate.icon} ค้นเพิ่มเติม</b> → วนกลับไป <b>ค้นหา</b> (สูงสุดตาม AGENTIC_MAX_ITERS)</span>
+                </div>
+              )}
+              <p className="text-[11px] text-slate-400 mt-2">{graph.nodes.length} nodes · {graph.edges.length} edges {graph.edges.some(e => e.conditional) ? `· ${graph.edges.filter(e => e.conditional).length} conditional` : ""}</p>
             </div>
           )}
         </>

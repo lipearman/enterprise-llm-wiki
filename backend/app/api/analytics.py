@@ -106,6 +106,29 @@ def _latest_eval() -> dict | None:
         return None
 
 
+@router.get("/agent-graph")
+def agent_graph():
+    """Phase 7 — introspect the LangGraph agentic StateGraph for visualization.
+    Returns nodes + edges (with conditional flag) + a Mermaid diagram source."""
+    try:
+        from app.services.agent_graph import build_agent_graph
+        from app.services.chat_service import chat_service
+        g = build_agent_graph(chat_service).get_graph()
+        nodes = list(g.nodes.keys())
+        edges = [{"source": e.source, "target": e.target,
+                  "conditional": bool(getattr(e, "conditional", False))} for e in g.edges]
+        try:
+            mermaid = g.draw_mermaid()
+        except Exception:
+            mermaid = None
+        return {"enabled": settings.ENABLE_LANGGRAPH, "available": True,
+                "nodes": nodes, "edges": edges, "mermaid": mermaid}
+    except Exception as exc:
+        logger.warning("agent_graph_introspect_failed | %s", str(exc)[:100])
+        return {"enabled": settings.ENABLE_LANGGRAPH, "available": False,
+                "error": str(exc)[:120], "nodes": [], "edges": []}
+
+
 @router.get("/overview")
 def overview(company_code: str | None = Query(None)):
     cc = company_code or settings.DEFAULT_COMPANY_CODE

@@ -1055,7 +1055,7 @@ enterprise-llm-wiki/
 | Phase 4.5 — Multi-Provider AI | ✅ Done | ~~DB-backed provider router + auto-failover chain~~ · ~~Provider UI (test/model dropdown)~~ · ~~Gemini via OpenAI-compat~~ · ~~Gemini embeddings @1024 (fix Thai vector collapse)~~ · ~~Ragas failover judge~~ |
 | Phase 5 — Agentic RAG | ✅ Done | ~~Query planner (simple↔complex routing)~~ · ~~Multi-step retrieval (retrieve→validate→reformulate loop)~~ · ~~Validation agent (LLM critic)~~ · ~~Multi-hop GraphRAG traversal (BFS)~~ — *opt-in via flags; lightweight async loop แทน LangGraph* |
 | Phase 6 — Advanced | ✅ Done | ~~Analytics dashboard (per-company stats · eval scores · provider/agentic status)~~ · ~~Tool-calling agent (function-calling)~~ · ~~LangGraph agentic graph + **streaming agent steps** to the chat UI~~ |
-| Phase 7 — Future | 📋 Planned | Human-in-the-loop approval · graph visualization/debugging · checkpoint-resumable conversations |
+| Phase 7 — Observability & Control | 🚧 In progress | ~~Agent graph visualization (nodes/edges/Mermaid on dashboard)~~ · Human-in-the-loop approval *(planned)* · checkpoint-resumable conversations *(planned)* |
 
 ---
 
