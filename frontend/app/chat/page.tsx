@@ -20,6 +20,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput]       = useState("");
   const [company, setCompany]   = useState(DEFAULT_COMPANY);
+  const [companies, setCompanies] = useState<{ company_code: string; company_name?: string }[]>([]);
   const [loading, setLoading]   = useState(false);
   const [forceRag, setForceRag] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -32,6 +33,14 @@ export default function ChatPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Load company list from DB (replaces the old hardcoded DEVES/LOCKTON options)
+  useEffect(() => {
+    apiFetch("/api/companies")
+      .then((r) => r.json())
+      .then((d) => setCompanies((d.items || []).filter((c: any) => c.is_active !== false)))
+      .catch(() => {});
+  }, []);
 
   async function send() {
     const q = input.trim();
@@ -90,8 +99,11 @@ export default function ChatPage() {
             className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800
                        text-slate-800 dark:text-slate-200 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
           >
-            <option value="DEVES">DEVES</option>
-            <option value="LOCKTON">LOCKTON</option>
+            {(companies.length ? companies : [{ company_code: DEFAULT_COMPANY }]).map((c) => (
+              <option key={c.company_code} value={c.company_code}>
+                {c.company_name ? `${c.company_code} — ${c.company_name}` : c.company_code}
+              </option>
+            ))}
           </select>
           <label className="flex items-center gap-1.5 text-sm text-slate-600 dark:text-slate-400 cursor-pointer select-none">
             <input
