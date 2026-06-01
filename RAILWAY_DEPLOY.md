@@ -38,9 +38,13 @@ long-lived containers (not serverless).
 | `backend/Dockerfile` | API image, binds `$PORT` (Railway) / 8080 (local) |
 | `frontend/Dockerfile` | Next standalone, binds `$PORT`, bakes `NEXT_PUBLIC_*` at build |
 | `backend/app/jobs/worker.py` | Clean worker entrypoint (`python -m app.jobs.worker`) |
-| `backend/railway.web.toml` | API service config (healthcheck `/api/health`) |
-| `backend/railway.worker.toml` | Worker service config (start cmd, no healthcheck) |
-| `frontend/railway.toml` | Frontend service config |
+| `frontend/railway.toml` | Frontend service config (standard name → auto-read) |
+
+> **Why no `railway.toml` for the backend?** Railway only auto-reads a file
+> named exactly `railway.toml`/`railway.json`. The backend has **two** services
+> (web + worker) sharing `backend/`, so they can't both use one `railway.toml`.
+> Configure those two in the **dashboard** instead (Builder + Root Directory +
+> the worker's start command) — see steps 2–3.
 
 ## Step-by-step
 
@@ -49,23 +53,31 @@ long-lived containers (not serverless).
 2. This creates the first service. You'll configure 3 services total.
 
 ### 2. Backend (API) service
-- Settings → **Root Directory**: `backend`
-- Settings → **Config-as-code path**: `backend/railway.web.toml`
+- Settings → **Build → Builder**: `Dockerfile`  ← force it, or Railway falls
+  back to Railpack and fails with *"start.sh not found"*
+- Settings → **Build → Root Directory**: `backend`
+- Settings → **Build → Dockerfile Path**: `Dockerfile`
+- Settings → **Deploy → Healthcheck Path**: `/api/health`
 - Variables: add the backend env vars (see table below)
-- Deploy → wait for healthcheck `/api/health` to pass
+- Deploy → wait for the healthcheck to pass
 - Settings → **Networking → Generate Domain** → note the public URL
   (e.g. `https://api-xxxx.up.railway.app`)
 
 ### 3. Worker service
 - **New → GitHub Repo** (same repo) → or **New → Empty Service** then connect repo
-- Settings → **Root Directory**: `backend`
-- Settings → **Config-as-code path**: `backend/railway.worker.toml`
+- Settings → **Build → Builder**: `Dockerfile`
+- Settings → **Build → Root Directory**: `backend`
+- Settings → **Build → Dockerfile Path**: `Dockerfile`
+- Settings → **Deploy → Custom Start Command**: `python -m app.jobs.worker`
+- No healthcheck, no domain (it has no HTTP server)
 - Variables: **same** as backend (copy them, or use a shared variable group)
-- No domain needed (it has no HTTP server)
 
 ### 4. Frontend service
 - **New → GitHub Repo** (same repo)
-- Settings → **Root Directory**: `frontend`
+- Settings → **Build → Builder**: `Dockerfile`
+- Settings → **Build → Root Directory**: `frontend`
+  (`frontend/railway.toml` is auto-read since it uses the standard name, but
+  setting Builder explicitly avoids any Railpack fallback)
 - Variables:
   - `NEXT_PUBLIC_API_BASE_URL` = the backend public URL from step 2
   - `NEXT_PUBLIC_COMPANY_CODE` = `DEVES`
