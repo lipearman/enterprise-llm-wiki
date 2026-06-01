@@ -13,6 +13,12 @@ Chatbot · LLM Wiki · Knowledge Graph · Multi-Crawler · Multi-company · API 
 ![pgvector](https://img.shields.io/badge/pgvector-1024d-336791?style=flat-square&logo=postgresql&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)
 
+### 🚀 [Live Demo](https://enterprise-llm-wiki-production.up.railway.app)
+
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Railway-0B0D0E?style=for-the-badge&logo=railway&logoColor=white)](https://enterprise-llm-wiki-production.up.railway.app)
+
+🔗 **https://enterprise-llm-wiki-production.up.railway.app**
+
 </div>
 
 ---
