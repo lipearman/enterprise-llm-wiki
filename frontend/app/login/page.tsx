@@ -82,25 +82,6 @@ export default function LoginPage() {
               />
             </div>
 
-            {/* Demo key hint */}
-            <div className="rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 px-3.5 py-3">
-              <p className="text-xs font-semibold text-indigo-700 dark:text-indigo-300 mb-1.5">
-                🔑 Demo Key สำหรับทดสอบระบบ
-              </p>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 text-xs font-mono text-indigo-800 dark:text-indigo-200 bg-white dark:bg-slate-900 px-2 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-700 select-all truncate">
-                  changeme-enterprise-wiki-2025
-                </code>
-                <button
-                  type="button"
-                  onClick={() => setApiKey("changeme-enterprise-wiki-2025")}
-                  className="shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
-                >
-                  ใช้งาน
-                </button>
-              </div>
-            </div>
-
             {error && (
               <div className="rounded-lg bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900 px-3 py-2 text-sm text-red-600 dark:text-red-400">
                 ❌ {error}
