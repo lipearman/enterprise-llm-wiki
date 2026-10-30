@@ -1,0 +1,5 @@
+# Secrets & generated runtime env — never commit
+.env
+backend.env
+.secrets.local
+certs/

@@ -42,11 +42,24 @@ export function clearToken(): void {
   sessionStorage.removeItem(TOKEN_KEY);
 }
 
+/**
+ * Prefix relative "/api/…" paths with API_BASE so the browser calls the backend
+ * origin directly (required when the frontend is on Vercel and the API lives on
+ * the Tailscale host). Absolute URLs and callers that already prepended API_BASE
+ * (e.g. `${API_BASE}/api/…`) are left untouched, so there is never a double prefix.
+ */
+export function resolveUrl(input: RequestInfo | URL): RequestInfo | URL {
+  if (typeof input === "string" && input.startsWith("/")) {
+    return `${API_BASE}${input}`;
+  }
+  return input;
+}
+
 export function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const token = getToken();
   const headers = new Headers(init?.headers);
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  return fetch(input, { ...init, headers });
+  return fetch(resolveUrl(input), { ...init, headers });
 }

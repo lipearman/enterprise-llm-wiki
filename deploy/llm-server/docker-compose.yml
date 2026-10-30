@@ -1,0 +1,106 @@
+name: ewiki
+
+# Enterprise LLM Wiki — self-hosted stack for llm-server (WSL2 + Docker).
+#
+#   browser (tailnet) ─► https://llm-server.tail923b9a.ts.net  (caddy, TLS)
+#                          ├─ /api/*  ─► backend:8080  (FastAPI)
+#                          └─ :8000   ─► rest:3000     (PostgREST, internal only —
+#                                         emulates Supabase /rest/v1 for the backend)
+#   backend ─► db (postgres + pgvector)  via PostgREST
+#   backend ─► Ollama on the Windows host (100.99.80.84:11434) for embeddings / LLM
+#
+# All secrets come from ./.env  (gitignored). See .env.example.
+
+services:
+  # ── Postgres + pgvector (the "database") ──────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    # Exposed on the host loopback only, for pg_dump/psql maintenance.
+    ports:
+      - "127.0.0.1:55432:5432"
+
+  # ── PostgREST — the Supabase REST layer the backend talks to ──────────────
+  rest:
+    image: postgrest/postgrest:v12.2.3
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+
+  # ── Backend API (FastAPI) ─────────────────────────────────────────────────
+  backend:
+    build:
+      context: ../../backend
+    image: ewiki-app:latest
+    restart: unless-stopped
+    env_file:
+      - ./backend.env
+    depends_on:
+      db:
+        condition: service_healthy
+    # Reach Ollama running on the Windows host over the shared (mirrored) net.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ── Background job worker ─────────────────────────────────────────────────
+  worker:
+    image: ewiki-app:latest
+    restart: unless-stopped
+    env_file:
+      - ./backend.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      backend:
+        condition: service_started
+    # Flow-list so YAML turns \n into real newlines (a folded '>' scalar would
+    # collapse the Python onto one line and break indentation).
+    command: ["python", "-u", "-c", "import asyncio\nfrom app.jobs.runner import run_pending_jobs_once\nfrom app.core.logging import logger\n\nasync def loop():\n    logger.info('Worker started \u2014 polling every 10 s')\n    while True:\n        try:\n            await run_pending_jobs_once(5)\n        except Exception as e:\n            logger.error(f'Worker poll error: {e}')\n        await asyncio.sleep(10)\n\nasyncio.run(loop())\n"]
+
+  # ── Caddy — TLS ingress + internal PostgREST gateway ──────────────────────
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - rest
+    # Published on the host loopback only. `tailscale serve` on the Windows node
+    # forwards https://llm-server.tail923b9a.ts.net/ewiki/* -> here (127.0.0.1:18490).
+    # (Tailscale already owns :443 and terminates TLS — see deploy README.)
+    ports:
+      - "127.0.0.1:18490:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

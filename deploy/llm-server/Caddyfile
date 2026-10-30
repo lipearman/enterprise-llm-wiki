@@ -1,0 +1,28 @@
+{
+	admin off
+}
+
+# ── App ingress (HTTP) — sits behind `tailscale serve`, which terminates TLS
+# for https://llm-server.tail923b9a.ts.net and forwards /ewiki/* here, ALREADY
+# stripping the /ewiki prefix. So Caddy sees /api/... and maps the backend's
+# port 8080 onto those API routes.
+:80 {
+	handle /api/* {
+		reverse_proxy backend:8080
+	}
+	handle {
+		header Content-Type "text/plain; charset=utf-8"
+		respond "enterprise-llm-wiki API — use /ewiki/api/health" 200
+	}
+}
+
+# ── Internal Supabase-compatible gateway (docker network only) ──────────────
+# The backend's supabase-py client calls ${SUPABASE_URL}/rest/v1/... and
+# .../rest/v1/rpc/...  We strip /rest/v1 and forward to PostgREST.
+# Reachable only as http://caddy:8000 inside the compose network.
+:8000 {
+	handle_path /rest/v1/* {
+		reverse_proxy rest:3000
+	}
+	respond 404
+}
